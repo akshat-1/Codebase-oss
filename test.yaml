@@ -22,12 +22,13 @@ jobs:
 
           ECOSYSTEMS=()
 
-          # find_file <pattern> - returns 0 if any file matching pattern exists (ignores common vendor/deps dirs)
+          # find_file <pattern> - returns 0 if any file matching pattern exists
+          # Use -prune to skip common vendor/dependency directories entirely (much faster on large repos)
           find_file() {
             local pattern="$1"
-            find "$WORKSPACE_PATH" -type f -name "$pattern" \
-              -not -path "*/node_modules/*" -not -path "*/vendor/*" -not -path "*/.venv/*" -not -path "*/.git/*" \
-              -print -quit 2>/dev/null
+            find "$WORKSPACE_PATH" \
+              \( -type d \( -name "node_modules" -o -name "vendor" -o -name ".venv" -o -name ".git" -o -name ".terraform" \) -prune \) -o \
+              -type f -name "$pattern" -print -quit 2>/dev/null
           }
 
           add_unique() {
@@ -92,7 +93,7 @@ jobs:
           fi
 
           # Terraform
-          if find "$WORKSPACE_PATH" -type f -name '*.tf' -not -path "*/.terraform/*" -print -quit >/dev/null 2>&1; then
+          if find "$WORKSPACE_PATH" \( -type d \( -name "node_modules" -o -name "vendor" -o -name ".venv" -o -name ".git" -o -name ".terraform" \) -prune \) -o -type f -name '*.tf' -print -quit >/dev/null 2>&1; then
             add_unique "terraform"
           fi
 
