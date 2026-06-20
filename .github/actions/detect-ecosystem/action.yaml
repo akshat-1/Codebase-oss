@@ -1,35 +1,40 @@
 name: Detect Ecosystem
 description: >
-  Detects the project ecosystem (node, python, java, etc.) by inspecting
-  repo files. Replace the detection logic below with your own — the
-  important part is that it sets the 'ecosystem' output.
+  Detects the project ecosystem by inspecting files in the workspace.
+  Sets the 'ecosystem' output, consumed by resolve-config in
+  promote-to-release.yml.
 
 outputs:
   ecosystem:
-    description: Detected ecosystem identifier (e.g. node, python, java, unknown)
-    value: ${{ steps.detect.outputs.ecosystem }}
+    description: >
+      Detected ecosystem identifier: node, maven, gradle, python, go, or
+      unknown.
+    value: ${{ steps.check-files.outputs.ecosystem }}
 
 runs:
   using: "composite"
   steps:
-    - id: detect
-      shell: bash
+    - name: Identify Ecosystem
+      id: check-files
+      shell: bash # Forces self-hosted runners to use Bash syntax
       run: |
-        set -e
+        WORKSPACE_PATH="${{ github.workspace }}"
+        echo "Checking files inside workspace directory: $WORKSPACE_PATH"
 
         ECOSYSTEM="unknown"
 
-        if [ -f "package.json" ]; then
+        # Crucial: Keep the spaces around the [ and ] brackets
+        if [ -f "$WORKSPACE_PATH/package.json" ]; then
           ECOSYSTEM="node"
-        elif [ -f "pyproject.toml" ] || [ -f "requirements.txt" ] || [ -f "setup.py" ]; then
+        elif [ -f "$WORKSPACE_PATH/pom.xml" ]; then
+          ECOSYSTEM="maven"
+        elif [ -f "$WORKSPACE_PATH/build.gradle" ] || [ -f "$WORKSPACE_PATH/build.gradle.kts" ]; then
+          ECOSYSTEM="gradle"
+        elif [ -f "$WORKSPACE_PATH/requirements.txt" ] || [ -f "$WORKSPACE_PATH/pyproject.toml" ] || [ -f "$WORKSPACE_PATH/setup.py" ]; then
           ECOSYSTEM="python"
-        elif [ -f "pom.xml" ] || [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
-          ECOSYSTEM="java"
-        elif [ -f "go.mod" ]; then
+        elif [ -f "$WORKSPACE_PATH/go.mod" ]; then
           ECOSYSTEM="go"
-        elif [ -f "Cargo.toml" ]; then
-          ECOSYSTEM="rust"
         fi
 
         echo "Detected ecosystem: $ECOSYSTEM"
-        echo "ecosystem=$ECOSYSTEM" >> "$GITHUB_OUTPUT"
+        echo "ecosystem=$ECOSYSTEM" >> $GITHUB_OUTPUT
