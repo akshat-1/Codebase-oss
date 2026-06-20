@@ -4,88 +4,110 @@ on: [push, pull_request, workflow_dispatch]
 
 jobs:
   detect-ecosystem:
-      runs-on: self-hosted 
+    runs-on: self-hosted
+    outputs:
+      ecosystem: ${{ steps.check-files.outputs.ecosystem }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-          outputs:
-                ecosystem: ${{ steps.check-files.outputs.ecosystem }}
+      - name: Identify All Ecosystems
+        id: check-files
+        shell: bash
+        run: |
+          set -euo pipefail
 
-                    steps:
-                          - name: Checkout repository
-                                  uses: actions/checkout@v4
+          WORKSPACE_PATH="${GITHUB_WORKSPACE:-$PWD}"
+          echo "Deep-scanning workspace: $WORKSPACE_PATH"
 
-                                        - name: Identify All Ecosystems
-                                                id: check-files
-                                                        shell: bash
-                                                                run: |
-                                                                          WORKSPACE_PATH="${{ github.workspace }}"
-                                                                                    echo "Deep-scanning workspace: $WORKSPACE_PATH"
-                                                                                              
-                                                                                                        # Initialize an empty array to collect findings
-                                                                                                                  ECOSYSTEMS=()
-                                                                                                                            
-                                                                                                                                      # Helper shortcut to find files while ignoring heavy dependency/build folders
-                                                                                                                                                # This prevents your self-hosted runner from slowing down in massive directories
-                                                                                                                                                          find_file() {
-                                                                                                                                                                      find "$WORKSPACE_PATH" -type d \( -name "node_modules" -o -name ".git" -o -name "target" -o -name ".gradle" -o -name "venv" -o -name ".venv" \) -prune -o -name "$1" -print -quit
-                                                                                                                                                                                }
+          ECOSYSTEMS=()
 
-                                                                                                                                                                                          # 1. Check for Node
-                                                                                                                                                                                                    if [ -n "$(find_file "package.json")" ]; then
-                                                                                                                                                                                                                ECOSYSTEMS+=("node")
-                                                                                                                                                                                                                          fi
-                                                                                                                                                                                                                                    
-                                                                                                                                                                                                                                              # 2. Check for Maven
-                                                                                                                                                                                                                                                        if [ -n "$(find_file "pom.xml")" ]; then
-                                                                                                                                                                                                                                                                    ECOSYSTEMS+=("maven")
-                                                                                                                                                                                                                                                                              fi
-                                                                                                                                                                                                                                                                                        
-                                                                                                                                                                                                                                                                                                  # 3. Check for Gradle
-                                                                                                                                                                                                                                                                                                            if [ -n "$(find_file "build.gradle")" ] || [ -n "$(find_file "build.gradle.kts")" ]; then
-                                                                                                                                                                                                                                                                                                                        ECOSYSTEMS+=("gradle")
-                                                                                                                                                                                                                                                                                                                                  fi
-                                                                                                                                                                                                                                                                                                                                            
-                                                                                                                                                                                                                                                                                                                                                      # 4. Check for Python/Pip
-                                                                                                                                                                                                                                                                                                                                                                if [ -n "$(find_file "requirements.txt")" ] || [ -n "$(find_file "pyproject.toml")" ] || [ -n "$(find_file "setup.py")" ]; then
-                                                                                                                                                                                                                                                                                                                                                                            ECOSYSTEMS+=("pip/python")
-                                                                                                                                                                                                                                                                                                                                                                                      fi
-                                                                                                                                                                                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                                                                                                                                                                                          # 5. Check for Go
-                                                                                                                                                                                                                                                                                                                                                                                                                    if [ -n "$(find_file "go.mod")" ]; then
-                                                                                                                                                                                                                                                                                                                                                                                                                                ECOSYSTEMS+=("go")
-                                                                                                                                                                                                                                                                                                                                                                                                                                          fi
+          # find_file <pattern> - returns 0 if any file matching pattern exists (ignores common vendor/deps dirs)
+          find_file() {
+            local pattern="$1"
+            find "$WORKSPACE_PATH" -type f -name "$pattern" \
+              -not -path "*/node_modules/*" -not -path "*/vendor/*" -not -path "*/.venv/*" -not -path "*/.git/*" \
+              -print -quit 2>/dev/null
+          }
 
-                                                                                                                                                                                                                                                                                                                                                                                                                                                    # Combine array elements separated by ' and '
-                                                                                                                                                                                                                                                                                                                                                                                                                                                              RESULT=""
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                        if [ ${#ECOSYSTEMS[@]} -eq 0 ]; then
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    RESULT="unknown"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              else
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          for i in "${!ECOSYSTEMS[@]}"; do
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        if [ $i -eq 0 ]; then
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        RESULT="${ECOSYSTEMS[$i]}"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      else
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      RESULT="$RESULT and ${ECOSYSTEMS[$i]}"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    fi
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                done
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          fi
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              echo "Detected combined ecosystems: $RESULT"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        echo "ecosystem=$RESULT" >> $GITHUB_OUTPUT
+          add_unique() {
+            local val="$1"
+            for e in "${ECOSYSTEMS[@]}"; do
+              [[ "$e" == "$val" ]] && return
+            done
+            ECOSYSTEMS+=("$val")
+          }
 
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              - name: Handle Detected Ecosystems
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      run: |
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                echo "The active codebase profiles are: ${{ steps.check-files.outputs.ecosystem }}"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    # Use string matching to run tasks conditionally
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              if [[ "${{ steps.check-files.outputs.ecosystem }}" == *"node"* ]]; then
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          echo "-> Found Node! Executing Node/NPM build tasks..."
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    fi
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        if [[ "${{ steps.check-files.outputs.ecosystem }}" == *"maven"* ]]; then
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    echo "-> Found Maven! Executing Maven build tasks..."
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              fi
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  if [[ "${{ steps.check-files.outputs.ecosystem }}" == *"gradle"* ]]; then
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              echo "-> Found Gradle! Executing Gradle build tasks..."
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        fi
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        git add .
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        
+          # Node.js / JavaScript
+          if find_file package.json >/dev/null 2>&1 || find_file yarn.lock >/dev/null 2>&1 || find_file package-lock.json >/dev/null 2>&1; then
+            add_unique "nodejs"
+          fi
+
+          # Python
+          if find_file requirements.txt >/dev/null 2>&1 || find_file pyproject.toml >/dev/null 2>&1 || find_file setup.py >/dev/null 2>&1; then
+            add_unique "python"
+          fi
+
+          # Go
+          if find_file go.mod >/dev/null 2>&1; then
+            add_unique "go"
+          fi
+
+          # Rust
+          if find_file Cargo.toml >/dev/null 2>&1; then
+            add_unique "rust"
+          fi
+
+          # Ruby
+          if find_file Gemfile >/dev/null 2>&1; then
+            add_unique "ruby"
+          fi
+
+          # Java (Maven/Gradle)
+          if find_file pom.xml >/dev/null 2>&1; then
+            add_unique "java-maven"
+          fi
+          if find_file build.gradle >/dev/null 2>&1 || find_file build.gradle.kts >/dev/null 2>&1; then
+            add_unique "java-gradle"
+          fi
+
+          # PHP
+          if find_file composer.json >/dev/null 2>&1; then
+            add_unique "php"
+          fi
+
+          # .NET
+          if find_file "*.csproj" >/dev/null 2>&1 || find_file global.json >/dev/null 2>&1; then
+            add_unique "dotnet"
+          fi
+
+          # Docker
+          if find_file Dockerfile >/dev/null 2>&1 || find_file docker-compose.yml >/dev/null 2>&1; then
+            add_unique "docker"
+          fi
+
+          # Kubernetes (manifests / kustomize)
+          if find_file kustomization.yml >/dev/null 2>&1 || find_file kustomization.yaml >/dev/null 2>&1 || find_file "*.k8s.yml" >/dev/null 2>&1 || find_file "*.k8s.yaml" >/dev/null 2>&1; then
+            add_unique "kubernetes"
+          fi
+
+          # Terraform
+          if find "$WORKSPACE_PATH" -type f -name '*.tf' -not -path "*/.terraform/*" -print -quit >/dev/null 2>&1; then
+            add_unique "terraform"
+          fi
+
+          # Detect monorepos / package managers by lockfiles
+          if find_file pnpm-lock.yaml >/dev/null 2>&1 || find_file pnpm-workspace.yaml >/dev/null 2>&1; then
+            add_unique "pnpm"
+          fi
+
+          # If nothing detected, mark as unknown
+          if [ ${#ECOSYSTEMS[@]} -eq 0 ]; then
+            add_unique "unknown"
+          fi
+
+          IFS=','; ECOSYSTEMS_CSV="${ECOSYSTEMS[*]}"; unset IFS
+          echo "Detected ecosystems: $ECOSYSTEMS_CSV"
+
+          # Export to GitHub Actions output (new recommended method)
+          echo "ecosystem=$ECOSYSTEMS_CSV" >> "$GITHUB_OUTPUT"
