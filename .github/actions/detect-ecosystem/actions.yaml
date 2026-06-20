@@ -1,0 +1,35 @@
+name: Detect Ecosystem
+description: >
+  Detects the project ecosystem (node, python, java, etc.) by inspecting
+  repo files. Replace the detection logic below with your own — the
+  important part is that it sets the 'ecosystem' output.
+
+outputs:
+  ecosystem:
+    description: Detected ecosystem identifier (e.g. node, python, java, unknown)
+    value: ${{ steps.detect.outputs.ecosystem }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: detect
+      shell: bash
+      run: |
+        set -e
+
+        ECOSYSTEM="unknown"
+
+        if [ -f "package.json" ]; then
+          ECOSYSTEM="node"
+        elif [ -f "pyproject.toml" ] || [ -f "requirements.txt" ] || [ -f "setup.py" ]; then
+          ECOSYSTEM="python"
+        elif [ -f "pom.xml" ] || [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+          ECOSYSTEM="java"
+        elif [ -f "go.mod" ]; then
+          ECOSYSTEM="go"
+        elif [ -f "Cargo.toml" ]; then
+          ECOSYSTEM="rust"
+        fi
+
+        echo "Detected ecosystem: $ECOSYSTEM"
+        echo "ecosystem=$ECOSYSTEM" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,278 @@
+name: Setup Toolchain
+description: >
+  Installs the toolchain for a given ecosystem directly on the self-hosted
+  runner (no Docker), caching by exact version under /opt/toolchains so
+  repeat runs skip the download/install if already present. All downloads
+  come from official public sources (Adoptium, nodejs.org, go.dev, rustup.rs,
+  python.org).
+
+inputs:
+  ecosystem:
+    description: One of node, python, java-maven, java-gradle, go, rust
+    required: true
+  node_version:
+    description: Node.js version to install
+    required: false
+    default: "20.18.1"
+  python_version:
+    description: Python version to build from source
+    required: false
+    default: "3.12.7"
+  java_version:
+    description: Java (Temurin) major version to install
+    required: false
+    default: "21"
+  maven_version:
+    description: Maven version to install (only used for java-maven)
+    required: false
+    default: "3.9.9"
+  gradle_version:
+    description: Gradle version to install (only used for java-gradle)
+    required: false
+    default: "8.10.2"
+  go_version:
+    description: Go version to install
+    required: false
+    default: "1.22.9"
+  rust_version:
+    description: Rust toolchain channel/version to install
+    required: false
+    default: "stable"
+
+outputs:
+  bin_path:
+    description: Directory to prepend to PATH to use the installed toolchain
+    value: ${{ steps.finalize.outputs.bin_path }}
+  env_file:
+    description: Shell snippet to `source` for extra env vars (e.g. JAVA_HOME, GOROOT)
+    value: ${{ steps.finalize.outputs.env_file }}
+
+runs:
+  using: "composite"
+  steps:
+    # ---------------------------------------------------------------------
+    # Node.js — official prebuilt tarball from nodejs.org, no compiling.
+    # ---------------------------------------------------------------------
+    - name: Install Node.js
+      if: inputs.ecosystem == 'node'
+      shell: bash
+      run: |
+        set -e
+        VERSION="${{ inputs.node_version }}"
+        DEST="/opt/toolchains/node-${VERSION}"
+
+        if [ -x "$DEST/bin/node" ] && [ "$("$DEST/bin/node" --version)" = "v${VERSION}" ]; then
+          echo "Node ${VERSION} already installed at $DEST, skipping download"
+        else
+          echo "Installing Node ${VERSION} to $DEST"
+          sudo mkdir -p "$DEST"
+          TARBALL="node-v${VERSION}-linux-x64.tar.xz"
+          curl -fsSL -o "/tmp/${TARBALL}" "https://nodejs.org/dist/v${VERSION}/${TARBALL}"
+          sudo tar -xf "/tmp/${TARBALL}" -C "$DEST" --strip-components=1
+          rm -f "/tmp/${TARBALL}"
+        fi
+
+        echo "TOOLCHAIN_BIN=$DEST/bin" >> "$GITHUB_ENV"
+        echo "TOOLCHAIN_ENV=" >> "$GITHUB_ENV"
+
+    # ---------------------------------------------------------------------
+    # Java — Eclipse Temurin (Adoptium) prebuilt JDK, plus Maven or Gradle
+    # as a separate prebuilt tarball depending on which build tool is used.
+    # ---------------------------------------------------------------------
+    - name: Install Java (Temurin JDK)
+      if: startsWith(inputs.ecosystem, 'java')
+      shell: bash
+      run: |
+        set -e
+        JAVA_VERSION="${{ inputs.java_version }}"
+        JAVA_DEST="/opt/toolchains/temurin-${JAVA_VERSION}"
+
+        if [ -x "$JAVA_DEST/bin/java" ]; then
+          echo "Temurin JDK ${JAVA_VERSION} already installed at $JAVA_DEST, skipping download"
+        else
+          echo "Installing Temurin JDK ${JAVA_VERSION} to $JAVA_DEST"
+          sudo mkdir -p "$JAVA_DEST"
+          API_URL="https://api.adoptium.net/v3/binary/latest/${JAVA_VERSION}/ga/linux/x64/jdk/hotspot/normal/eclipse"
+          curl -fsSL -o /tmp/temurin.tar.gz "$API_URL"
+          sudo tar -xzf /tmp/temurin.tar.gz -C "$JAVA_DEST" --strip-components=1
+          rm -f /tmp/temurin.tar.gz
+        fi
+
+        echo "JAVA_HOME=$JAVA_DEST" >> "$GITHUB_ENV"
+        echo "INTERNAL_JAVA_HOME=$JAVA_DEST" >> "$GITHUB_ENV"
+
+    - name: Install Maven
+      if: inputs.ecosystem == 'java-maven'
+      shell: bash
+      run: |
+        set -e
+        MVN_VERSION="${{ inputs.maven_version }}"
+        MVN_DEST="/opt/toolchains/maven-${MVN_VERSION}"
+
+        if [ -x "$MVN_DEST/bin/mvn" ]; then
+          echo "Maven ${MVN_VERSION} already installed at $MVN_DEST, skipping download"
+        else
+          echo "Installing Maven ${MVN_VERSION} to $MVN_DEST"
+          sudo mkdir -p "$MVN_DEST"
+          TARBALL="apache-maven-${MVN_VERSION}-bin.tar.gz"
+          curl -fsSL -o "/tmp/${TARBALL}" \
+            "https://dlcdn.apache.org/maven/maven-3/${MVN_VERSION}/binaries/${TARBALL}"
+          sudo tar -xzf "/tmp/${TARBALL}" -C "$MVN_DEST" --strip-components=1
+          rm -f "/tmp/${TARBALL}"
+        fi
+
+        echo "TOOLCHAIN_BIN=$MVN_DEST/bin:$INTERNAL_JAVA_HOME/bin" >> "$GITHUB_ENV"
+
+    - name: Install Gradle
+      if: inputs.ecosystem == 'java-gradle'
+      shell: bash
+      run: |
+        set -e
+        GRADLE_VERSION="${{ inputs.gradle_version }}"
+        GRADLE_DEST="/opt/toolchains/gradle-${GRADLE_VERSION}"
+
+        if [ -x "$GRADLE_DEST/bin/gradle" ]; then
+          echo "Gradle ${GRADLE_VERSION} already installed at $GRADLE_DEST, skipping download"
+        else
+          echo "Installing Gradle ${GRADLE_VERSION} to $GRADLE_DEST"
+          sudo mkdir -p "$GRADLE_DEST"
+          ZIPFILE="gradle-${GRADLE_VERSION}-bin.zip"
+          curl -fsSL -o "/tmp/${ZIPFILE}" \
+            "https://services.gradle.org/distributions/${ZIPFILE}"
+          sudo unzip -q "/tmp/${ZIPFILE}" -d /tmp/gradle-extract
+          sudo cp -r /tmp/gradle-extract/gradle-${GRADLE_VERSION}/. "$GRADLE_DEST/"
+          sudo rm -rf /tmp/gradle-extract "/tmp/${ZIPFILE}"
+        fi
+
+        echo "TOOLCHAIN_BIN=$GRADLE_DEST/bin:$INTERNAL_JAVA_HOME/bin" >> "$GITHUB_ENV"
+
+    # ---------------------------------------------------------------------
+    # Go — official prebuilt tarball from go.dev, no compiling.
+    # ---------------------------------------------------------------------
+    - name: Install Go
+      if: inputs.ecosystem == 'go'
+      shell: bash
+      run: |
+        set -e
+        VERSION="${{ inputs.go_version }}"
+        DEST="/opt/toolchains/go-${VERSION}"
+
+        if [ -x "$DEST/go/bin/go" ]; then
+          echo "Go ${VERSION} already installed at $DEST, skipping download"
+        else
+          echo "Installing Go ${VERSION} to $DEST"
+          sudo mkdir -p "$DEST"
+          TARBALL="go${VERSION}.linux-amd64.tar.gz"
+          curl -fsSL -o "/tmp/${TARBALL}" "https://go.dev/dl/${TARBALL}"
+          sudo tar -xzf "/tmp/${TARBALL}" -C "$DEST"
+          rm -f "/tmp/${TARBALL}"
+        fi
+
+        echo "TOOLCHAIN_BIN=$DEST/go/bin" >> "$GITHUB_ENV"
+        echo "GOROOT=$DEST/go" >> "$GITHUB_ENV"
+
+    # ---------------------------------------------------------------------
+    # Rust — official rustup installer, scoped to a version-specific
+    # RUSTUP_HOME/CARGO_HOME so different rust_version inputs don't collide.
+    # ---------------------------------------------------------------------
+    - name: Install Rust
+      if: inputs.ecosystem == 'rust'
+      shell: bash
+      run: |
+        set -e
+        VERSION="${{ inputs.rust_version }}"
+        DEST="/opt/toolchains/rust-${VERSION}"
+
+        if [ -x "$DEST/cargo/bin/cargo" ]; then
+          echo "Rust ${VERSION} already installed at $DEST, skipping download"
+        else
+          echo "Installing Rust ${VERSION} to $DEST"
+          sudo mkdir -p "$DEST/rustup" "$DEST/cargo"
+          sudo chown -R "$(id -u):$(id -g)" "$DEST"
+          curl -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh
+          RUSTUP_HOME="$DEST/rustup" CARGO_HOME="$DEST/cargo" \
+            sh /tmp/rustup-init.sh -y --default-toolchain "$VERSION" --no-modify-path
+          rm -f /tmp/rustup-init.sh
+        fi
+
+        echo "TOOLCHAIN_BIN=$DEST/cargo/bin" >> "$GITHUB_ENV"
+        echo "RUSTUP_HOME=$DEST/rustup" >> "$GITHUB_ENV"
+        echo "CARGO_HOME=$DEST/cargo" >> "$GITHUB_ENV"
+
+    # ---------------------------------------------------------------------
+    # Python — built from source per python.org tarball, since the runner
+    # has no prebuilt-binary path available. Requires system build deps
+    # (gcc, make, *-devel libs), installed via dnf/yum if missing. This is
+    # the slowest path (typically 5-15 min on a cold cache) but only runs
+    # once per exact version; later runs hit the version-pinned cache dir.
+    # ---------------------------------------------------------------------
+    - name: Install Python build dependencies
+      if: inputs.ecosystem == 'python'
+      shell: bash
+      run: |
+        set -e
+        if command -v gcc >/dev/null 2>&1 && command -v make >/dev/null 2>&1; then
+          echo "Build tools already present, skipping system package install"
+        else
+          echo "Installing build dependencies via dnf/yum"
+          PKG_MGR="dnf"
+          command -v dnf >/dev/null 2>&1 || PKG_MGR="yum"
+          sudo "$PKG_MGR" groupinstall -y "Development Tools" || true
+          sudo "$PKG_MGR" install -y \
+            gcc gcc-c++ make zlib-devel bzip2 bzip2-devel readline-devel \
+            sqlite sqlite-devel openssl-devel tk-devel libffi-devel \
+            xz-devel wget
+        fi
+
+    - name: Build and install Python from source
+      if: inputs.ecosystem == 'python'
+      shell: bash
+      run: |
+        set -e
+        VERSION="${{ inputs.python_version }}"
+        DEST="/opt/toolchains/python-${VERSION}"
+
+        if [ -x "$DEST/bin/python3" ]; then
+          echo "Python ${VERSION} already installed at $DEST, skipping build"
+        else
+          echo "Building Python ${VERSION} from source to $DEST (this can take several minutes)"
+          BUILD_DIR="/tmp/python-build-${VERSION}"
+          rm -rf "$BUILD_DIR"
+          mkdir -p "$BUILD_DIR"
+          curl -fsSL -o "/tmp/Python-${VERSION}.tgz" \
+            "https://www.python.org/ftp/python/${VERSION}/Python-${VERSION}.tgz"
+          tar -xzf "/tmp/Python-${VERSION}.tgz" -C "$BUILD_DIR" --strip-components=1
+          rm -f "/tmp/Python-${VERSION}.tgz"
+
+          sudo mkdir -p "$DEST"
+          (
+            cd "$BUILD_DIR"
+            ./configure --prefix="$DEST" --enable-optimizations --with-ensurepip=install
+            make -j"$(nproc)"
+            sudo make altinstall
+          )
+          rm -rf "$BUILD_DIR"
+        fi
+
+        # altinstall creates pythonX.Y, not python3 — symlink for convenience
+        MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
+        if [ ! -x "$DEST/bin/python3" ]; then
+          sudo ln -sf "$DEST/bin/python${MAJOR_MINOR}" "$DEST/bin/python3"
+        fi
+        if [ ! -x "$DEST/bin/pip3" ]; then
+          sudo ln -sf "$DEST/bin/pip${MAJOR_MINOR}" "$DEST/bin/pip3"
+        fi
+
+        echo "TOOLCHAIN_BIN=$DEST/bin" >> "$GITHUB_ENV"
+
+    # ---------------------------------------------------------------------
+    # Finalize: expose what was set above as proper step outputs too, for
+    # callers that prefer reading outputs over relying on GITHUB_ENV alone.
+    # ---------------------------------------------------------------------
+    - name: Finalize toolchain paths
+      id: finalize
+      shell: bash
+      run: |
+        echo "bin_path=${TOOLCHAIN_BIN:-}" >> "$GITHUB_OUTPUT"
+        echo "env_file=${TOOLCHAIN_ENV:-}" >> "$GITHUB_OUTPUT"
+        echo "Resolved TOOLCHAIN_BIN=${TOOLCHAIN_BIN:-<empty>}"

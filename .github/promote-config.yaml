@@ -1,0 +1,36 @@
+# Fallback configuration for .github/workflows/promote-to-release.yml
+#
+# This file is only used if the corresponding repo variable is NOT set
+# under Settings > Secrets and variables > Actions > Variables.
+# Repo variables always take priority over this file.
+#
+# Edit these values directly — no need to touch the workflow YAML.
+
+# Branch that PRs are merged into, which triggers this workflow
+trigger_branch: main
+
+# Branch to promote the changes to via an auto-created PR
+release_branch: release
+
+# Shell command to install dependencies before building (optional, leave empty to skip)
+install_command: ""
+
+# Shell command to run the build. Required — workflow fails if this is empty
+# and BUILD_COMMAND repo variable is also unset.
+# Examples:
+#   npm ci && npm run build
+#   pip install -r requirements.txt && pytest
+#   mvn -B package
+build_command: "echo 'Set build_command in this file or BUILD_COMMAND repo variable'"
+
+# Exact toolchain versions to install on the self-hosted runner (no Docker —
+# see .github/actions/setup-toolchain). Leave any of these empty to use that
+# action's own built-in default version. Only the one matching your detected
+# ecosystem actually gets used; the rest are ignored.
+node_version: ""
+python_version: ""
+java_version: ""
+maven_version: ""
+gradle_version: ""
+go_version: ""
+rust_version: ""
