@@ -24,9 +24,18 @@ install_command: ""
 build_command: "echo 'Set build_command in this file or BUILD_COMMAND repo variable'"
 
 # Exact toolchain versions to install on the self-hosted runner (no Docker —
-# see .github/actions/setup-toolchain). Leave any of these empty to use that
-# action's own built-in default version. Only the one matching your detected
+# see .github/actions/setup-toolchain). Only the one matching your detected
 # ecosystem actually gets used; the rest are ignored.
+#
+# node_version, java_version, and go_version: if left empty here AND no
+# matching repo variable is set, the workflow tries to auto-detect the
+# version straight from the codebase before falling back to a hardcoded
+# default — see package.json "engines.node", pom.xml / build.gradle[.kts],
+# and go.mod respectively. Setting a value here (or as a repo variable)
+# always overrides auto-detection.
+#
+# python_version, maven_version, gradle_version, and rust_version are not
+# auto-detected — leave empty to use setup-toolchain's hardcoded default.
 node_version: ""
 python_version: ""
 java_version: ""

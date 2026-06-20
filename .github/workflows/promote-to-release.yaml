@@ -19,6 +19,16 @@ name: Build and Promote to Release
 #                         optional exact toolchain version overrides
 #                         (defaults are set in .github/actions/setup-toolchain)
 #
+#   Auto-detection: if JAVA_VERSION, NODE_VERSION, or GO_VERSION aren't set
+#   via repo variable or promote-config.yml, this tries to read them
+#   straight from the codebase before falling back to a hardcoded default:
+#     Java:   pom.xml (maven.compiler.source/target, java.version, <release>)
+#             or build.gradle[.kts] (sourceCompatibility, JavaLanguageVersion)
+#     Node:   package.json "engines.node" field
+#     Go:     go.mod "go" directive
+#   Python, Maven, Gradle, and Rust tool versions are not auto-detected and
+#   always use the repo variable / config file / hardcoded default chain.
+#
 #   Fallback: if repo variables aren't set, this reads
 #     .github/promote-config.yml (checked into the repo, edit freely)
 #
@@ -131,6 +141,73 @@ jobs:
             FILE_RUST_VERSION=$(yq -r '.rust_version // ""' "$CONFIG_FILE" 2>/dev/null || true)
           fi
 
+          # --------------------------------------------------------------
+          # Auto-detect language versions directly from the codebase.
+          # Uses plain `grep -E` (POSIX ERE only, no PCRE) since this runs
+          # on a minimal RHEL runner where `grep -P` support isn't
+          # guaranteed. These are best-effort: if a file doesn't match any
+          # known pattern, the detected value stays empty and the priority
+          # chain below falls through to the hardcoded default instead.
+          # This detection only ever fills a gap — an explicit repo
+          # variable or promote-config.yml value always wins over it.
+          # --------------------------------------------------------------
+          DETECTED_JAVA_VERSION=""
+          DETECTED_NODE_VERSION=""
+          DETECTED_GO_VERSION=""
+
+          if [ -f "pom.xml" ]; then
+            RAW=$(grep -oE '<maven\.compiler\.(source|target)>[0-9._]+' pom.xml 2>/dev/null | grep -oE '[0-9._]+$' | head -1)
+            if [ -z "$RAW" ]; then
+              RAW=$(grep -oE '<java\.version>[0-9._]+' pom.xml 2>/dev/null | grep -oE '[0-9._]+$' | head -1)
+            fi
+            if [ -z "$RAW" ]; then
+              RAW=$(grep -oE '<release>[0-9._]+' pom.xml 2>/dev/null | grep -oE '[0-9._]+$' | head -1)
+            fi
+            if [ -n "$RAW" ]; then
+              DETECTED_JAVA_VERSION="$RAW"
+            fi
+          fi
+
+          if [ -z "$DETECTED_JAVA_VERSION" ]; then
+            for GRADLE_FILE in build.gradle build.gradle.kts; do
+              [ -f "$GRADLE_FILE" ] || continue
+              RAW=$(grep -oE "sourceCompatibility[[:space:]]*=[[:space:]]*['\"]?[0-9._]+" "$GRADLE_FILE" 2>/dev/null | grep -oE '[0-9._]+$' | head -1)
+              if [ -z "$RAW" ]; then
+                RAW=$(grep -oE 'JavaLanguageVersion\.of\([0-9]+' "$GRADLE_FILE" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+              fi
+              if [ -n "$RAW" ]; then
+                DETECTED_JAVA_VERSION="$RAW"
+                break
+              fi
+            done
+          fi
+
+          # Normalize legacy "1.8" style notation to "8", and strip any
+          # trailing minor/patch (e.g. "17.0.2" -> "17") since Adoptium's
+          # API in setup-toolchain expects a bare major version.
+          if [ -n "$DETECTED_JAVA_VERSION" ]; then
+            case "$DETECTED_JAVA_VERSION" in
+              1.*) DETECTED_JAVA_VERSION="${DETECTED_JAVA_VERSION#1.}" ;;
+            esac
+            DETECTED_JAVA_VERSION=$(echo "$DETECTED_JAVA_VERSION" | grep -oE '^[0-9]+')
+          fi
+
+          if [ -f "package.json" ]; then
+            RAW=$(grep -oE '"node"[[:space:]]*:[[:space:]]*"[^"]*"' package.json 2>/dev/null | grep -oE '[0-9]+' | head -1)
+            if [ -n "$RAW" ]; then
+              DETECTED_NODE_VERSION="$RAW"
+            fi
+          fi
+
+          if [ -f "go.mod" ]; then
+            RAW=$(grep -oE '^go [0-9]+\.[0-9]+' go.mod 2>/dev/null | grep -oE '[0-9]+\.[0-9]+$' | head -1)
+            if [ -n "$RAW" ]; then
+              DETECTED_GO_VERSION="$RAW"
+            fi
+          fi
+
+          echo "Detected from codebase: java_version=$DETECTED_JAVA_VERSION node_version=$DETECTED_NODE_VERSION go_version=$DETECTED_GO_VERSION"
+
           # Ecosystem-based command defaults and the toolchain_id passed to
           # .github/actions/setup-toolchain. detect-ecosystem now reports
           # 'maven' and 'gradle' as distinct ecosystem values directly
@@ -179,16 +256,22 @@ jobs:
           BUILD_COMMAND="${VAR_BUILD_COMMAND:-${FILE_BUILD_COMMAND:-$ECO_BUILD}}"
           INSTALL_COMMAND="${VAR_INSTALL_COMMAND:-${FILE_INSTALL_COMMAND:-$ECO_INSTALL}}"
 
-          # Version overrides: repo variable > config file > action's own
-          # built-in default (left empty here means "use setup-toolchain's
-          # default", since blank action inputs fall back to their `default:`).
-          NODE_VERSION="${VAR_NODE_VERSION:-$FILE_NODE_VERSION}"
-          PYTHON_VERSION="${VAR_PYTHON_VERSION:-$FILE_PYTHON_VERSION}"
-          JAVA_VERSION="${VAR_JAVA_VERSION:-$FILE_JAVA_VERSION}"
-          MAVEN_VERSION="${VAR_MAVEN_VERSION:-$FILE_MAVEN_VERSION}"
-          GRADLE_VERSION="${VAR_GRADLE_VERSION:-$FILE_GRADLE_VERSION}"
-          GO_VERSION="${VAR_GO_VERSION:-$FILE_GO_VERSION}"
-          RUST_VERSION="${VAR_RUST_VERSION:-$FILE_RUST_VERSION}"
+          # Version overrides, priority order:
+          # repo variable > config file > detected from codebase > hardcoded default.
+          # IMPORTANT: the final fallback must resolve to a real, non-empty
+          # value here. Composite action inputs only fall back to their own
+          # `default:` when the input key is omitted entirely by the caller —
+          # passing an empty string explicitly (as job-output wiring does)
+          # overrides that default with "". The hardcoded defaults below are
+          # kept in sync with setup-toolchain/action.yml's own `default:`
+          # values for each input.
+          NODE_VERSION="${VAR_NODE_VERSION:-${FILE_NODE_VERSION:-${DETECTED_NODE_VERSION:-20.18.1}}}"
+          PYTHON_VERSION="${VAR_PYTHON_VERSION:-${FILE_PYTHON_VERSION:-3.12.7}}"
+          JAVA_VERSION="${VAR_JAVA_VERSION:-${FILE_JAVA_VERSION:-${DETECTED_JAVA_VERSION:-21}}}"
+          MAVEN_VERSION="${VAR_MAVEN_VERSION:-${FILE_MAVEN_VERSION:-3.9.9}}"
+          GRADLE_VERSION="${VAR_GRADLE_VERSION:-${FILE_GRADLE_VERSION:-8.10.2}}"
+          GO_VERSION="${VAR_GO_VERSION:-${FILE_GO_VERSION:-${DETECTED_GO_VERSION:-1.22.9}}}"
+          RUST_VERSION="${VAR_RUST_VERSION:-${FILE_RUST_VERSION:-stable}}"
 
           if [ -z "$BUILD_COMMAND" ]; then
             echo "::error::No build command resolved. Detected ecosystem '$ECOSYSTEM' has no default, and BUILD_COMMAND repo variable / promote-config.yml build_command is unset."
@@ -205,6 +288,9 @@ jobs:
           echo "Resolved release_branch=$RELEASE_BRANCH"
           echo "Resolved build_command=$BUILD_COMMAND"
           echo "Resolved install_command=$INSTALL_COMMAND"
+          echo "Resolved java_version=$JAVA_VERSION (auto-detected: ${DETECTED_JAVA_VERSION:-none})"
+          echo "Resolved node_version=$NODE_VERSION (auto-detected: ${DETECTED_NODE_VERSION:-none})"
+          echo "Resolved go_version=$GO_VERSION (auto-detected: ${DETECTED_GO_VERSION:-none})"
 
           SHOULD_RUN="false"
           if [ "$PR_BASE_REF" = "$TRIGGER_BRANCH" ]; then
