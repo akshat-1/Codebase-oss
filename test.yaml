@@ -99,8 +99,16 @@ jobs:
               echo "$cmd: NOT FOUND"
             fi
           done
-          [ -d "$HOME/.asdf" ] && echo "~/.asdf directory exists"
-          [ -d "$HOME/.sdkman" ] && echo "~/.sdkman directory exists"
+          if [ -d "$HOME/.asdf" ]; then
+            echo "~/.asdf directory exists"
+          else
+            echo "~/.asdf directory: not present"
+          fi
+          if [ -d "$HOME/.sdkman" ]; then
+            echo "~/.sdkman directory exists"
+          else
+            echo "~/.sdkman directory: not present"
+          fi
 
       - name: Check network / package registry access
         run: |
