@@ -53,9 +53,15 @@ name: Build and Promote to Release
 #
 # REQUIREMENTS PER REPO (manual, one-time, can't be done by copying files):
 #   1. A self-hosted runner must be registered to this repo or its org.
-#   2. The runner account needs passwordless sudo (or to run as root) to
-#      write under /opt/toolchains and, for Python, to install system build
-#      dependencies (gcc, make, *-devel packages) via dnf/yum.
+#   2. setup-toolchain writes to /opt/toolchains and, for Python, installs
+#      system build deps (gcc, make, *-devel packages) via dnf/yum/apt/pacman
+#      directly, with no `sudo` calls — it assumes the runner's own account
+#      already has the needed permissions (e.g. runs as root, as confirmed
+#      via diagnose-runner.yml). If your runner account is NOT root and
+#      lacks write access to /opt and package-manager privileges, either
+#      grant passwordless sudo to that account and add `sudo` back into
+#      .github/actions/setup-toolchain, or switch to running the actual
+#      runner service as root.
 #   3. If RELEASE_BRANCH has branch protection rules, confirm the token
 #      used here (default GITHUB_TOKEN, or a PAT in REPO_PAT secret) has
 #      permission to push branches and open PRs against it.

@@ -4,7 +4,9 @@ description: >
   runner (no Docker), caching by exact version under /opt/toolchains so
   repeat runs skip the download/install if already present. All downloads
   come from official public sources (Adoptium, nodejs.org, go.dev, rustup.rs,
-  python.org).
+  python.org). Node/Java/Maven/Gradle/Go/Rust use prebuilt tarballs (work on
+  any Linux distro); Python is built from source and detects dnf/yum, apt,
+  or pacman to install the required compiler/dev-library packages.
 
 inputs:
   ecosystem:
@@ -65,10 +67,10 @@ runs:
           echo "Node ${VERSION} already installed at $DEST, skipping download"
         else
           echo "Installing Node ${VERSION} to $DEST"
-          sudo mkdir -p "$DEST"
+          mkdir -p "$DEST"
           TARBALL="node-v${VERSION}-linux-x64.tar.xz"
           curl -fsSL -o "/tmp/${TARBALL}" "https://nodejs.org/dist/v${VERSION}/${TARBALL}"
-          sudo tar -xf "/tmp/${TARBALL}" -C "$DEST" --strip-components=1
+          tar -xf "/tmp/${TARBALL}" -C "$DEST" --strip-components=1
           rm -f "/tmp/${TARBALL}"
         fi
 
@@ -91,10 +93,10 @@ runs:
           echo "Temurin JDK ${JAVA_VERSION} already installed at $JAVA_DEST, skipping download"
         else
           echo "Installing Temurin JDK ${JAVA_VERSION} to $JAVA_DEST"
-          sudo mkdir -p "$JAVA_DEST"
+          mkdir -p "$JAVA_DEST"
           API_URL="https://api.adoptium.net/v3/binary/latest/${JAVA_VERSION}/ga/linux/x64/jdk/hotspot/normal/eclipse"
           curl -fsSL -o /tmp/temurin.tar.gz "$API_URL"
-          sudo tar -xzf /tmp/temurin.tar.gz -C "$JAVA_DEST" --strip-components=1
+          tar -xzf /tmp/temurin.tar.gz -C "$JAVA_DEST" --strip-components=1
           rm -f /tmp/temurin.tar.gz
         fi
 
@@ -113,11 +115,11 @@ runs:
           echo "Maven ${MVN_VERSION} already installed at $MVN_DEST, skipping download"
         else
           echo "Installing Maven ${MVN_VERSION} to $MVN_DEST"
-          sudo mkdir -p "$MVN_DEST"
+          mkdir -p "$MVN_DEST"
           TARBALL="apache-maven-${MVN_VERSION}-bin.tar.gz"
           curl -fsSL -o "/tmp/${TARBALL}" \
             "https://dlcdn.apache.org/maven/maven-3/${MVN_VERSION}/binaries/${TARBALL}"
-          sudo tar -xzf "/tmp/${TARBALL}" -C "$MVN_DEST" --strip-components=1
+          tar -xzf "/tmp/${TARBALL}" -C "$MVN_DEST" --strip-components=1
           rm -f "/tmp/${TARBALL}"
         fi
 
@@ -135,13 +137,13 @@ runs:
           echo "Gradle ${GRADLE_VERSION} already installed at $GRADLE_DEST, skipping download"
         else
           echo "Installing Gradle ${GRADLE_VERSION} to $GRADLE_DEST"
-          sudo mkdir -p "$GRADLE_DEST"
+          mkdir -p "$GRADLE_DEST"
           ZIPFILE="gradle-${GRADLE_VERSION}-bin.zip"
           curl -fsSL -o "/tmp/${ZIPFILE}" \
             "https://services.gradle.org/distributions/${ZIPFILE}"
-          sudo unzip -q "/tmp/${ZIPFILE}" -d /tmp/gradle-extract
-          sudo cp -r /tmp/gradle-extract/gradle-${GRADLE_VERSION}/. "$GRADLE_DEST/"
-          sudo rm -rf /tmp/gradle-extract "/tmp/${ZIPFILE}"
+          unzip -q "/tmp/${ZIPFILE}" -d /tmp/gradle-extract
+          cp -r /tmp/gradle-extract/gradle-${GRADLE_VERSION}/. "$GRADLE_DEST/"
+          rm -rf /tmp/gradle-extract "/tmp/${ZIPFILE}"
         fi
 
         echo "TOOLCHAIN_BIN=$GRADLE_DEST/bin:$INTERNAL_JAVA_HOME/bin" >> "$GITHUB_ENV"
@@ -161,10 +163,10 @@ runs:
           echo "Go ${VERSION} already installed at $DEST, skipping download"
         else
           echo "Installing Go ${VERSION} to $DEST"
-          sudo mkdir -p "$DEST"
+          mkdir -p "$DEST"
           TARBALL="go${VERSION}.linux-amd64.tar.gz"
           curl -fsSL -o "/tmp/${TARBALL}" "https://go.dev/dl/${TARBALL}"
-          sudo tar -xzf "/tmp/${TARBALL}" -C "$DEST"
+          tar -xzf "/tmp/${TARBALL}" -C "$DEST"
           rm -f "/tmp/${TARBALL}"
         fi
 
@@ -187,8 +189,8 @@ runs:
           echo "Rust ${VERSION} already installed at $DEST, skipping download"
         else
           echo "Installing Rust ${VERSION} to $DEST"
-          sudo mkdir -p "$DEST/rustup" "$DEST/cargo"
-          sudo chown -R "$(id -u):$(id -g)" "$DEST"
+          mkdir -p "$DEST/rustup" "$DEST/cargo"
+          chown -R "$(id -u):$(id -g)" "$DEST"
           curl -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh
           RUSTUP_HOME="$DEST/rustup" CARGO_HOME="$DEST/cargo" \
             sh /tmp/rustup-init.sh -y --default-toolchain "$VERSION" --no-modify-path
@@ -202,9 +204,14 @@ runs:
     # ---------------------------------------------------------------------
     # Python — built from source per python.org tarball, since the runner
     # has no prebuilt-binary path available. Requires system build deps
-    # (gcc, make, *-devel libs), installed via dnf/yum if missing. This is
-    # the slowest path (typically 5-15 min on a cold cache) but only runs
-    # once per exact version; later runs hit the version-pinned cache dir.
+    # (compiler + dev libs), installed via the detected package manager if
+    # missing. This is the slowest path (typically 5-15 min on a cold
+    # cache) but only runs once per exact version; later runs hit the
+    # version-pinned cache dir.
+    #
+    # Supports dnf/yum (RHEL/Fedora/CentOS), apt (Debian/Ubuntu), and
+    # pacman (Arch) — package names differ per distro family, so each gets
+    # its own install command rather than a single shared list.
     # ---------------------------------------------------------------------
     - name: Install Python build dependencies
       if: inputs.ecosystem == 'python'
@@ -214,14 +221,35 @@ runs:
         if command -v gcc >/dev/null 2>&1 && command -v make >/dev/null 2>&1; then
           echo "Build tools already present, skipping system package install"
         else
-          echo "Installing build dependencies via dnf/yum"
-          PKG_MGR="dnf"
-          command -v dnf >/dev/null 2>&1 || PKG_MGR="yum"
-          sudo "$PKG_MGR" groupinstall -y "Development Tools" || true
-          sudo "$PKG_MGR" install -y \
-            gcc gcc-c++ make zlib-devel bzip2 bzip2-devel readline-devel \
-            sqlite sqlite-devel openssl-devel tk-devel libffi-devel \
-            xz-devel wget
+          if command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+            PKG_MGR="dnf"
+            command -v dnf >/dev/null 2>&1 || PKG_MGR="yum"
+            echo "Detected $PKG_MGR (RHEL/Fedora family) — installing build dependencies"
+            "$PKG_MGR" groupinstall -y "Development Tools" || true
+            "$PKG_MGR" install -y \
+              gcc gcc-c++ make zlib-devel bzip2 bzip2-devel readline-devel \
+              sqlite sqlite-devel openssl-devel tk-devel libffi-devel \
+              xz-devel wget
+
+          elif command -v apt-get >/dev/null 2>&1; then
+            echo "Detected apt (Debian/Ubuntu family) — installing build dependencies"
+            apt-get update -y
+            apt-get install -y \
+              build-essential zlib1g-dev libbz2-dev libreadline-dev \
+              libsqlite3-dev libssl-dev tk-dev libffi-dev liblzma-dev \
+              wget curl
+
+          elif command -v pacman >/dev/null 2>&1; then
+            echo "Detected pacman (Arch family) — installing build dependencies"
+            # Arch doesn't split runtime/-devel packages the way RHEL/Debian
+            # do, so headers are included in the base packages already.
+            pacman -Sy --noconfirm --needed \
+              base-devel zlib bzip2 readline sqlite openssl tk libffi xz wget
+
+          else
+            echo "::error::No supported package manager found (looked for dnf/yum, apt-get, pacman). Install gcc, make, and Python build headers manually, or set BUILD_COMMAND/INSTALL_COMMAND to skip the python toolchain_id and use a tool already on PATH."
+            exit 1
+          fi
         fi
 
     - name: Build and install Python from source
@@ -244,12 +272,12 @@ runs:
           tar -xzf "/tmp/Python-${VERSION}.tgz" -C "$BUILD_DIR" --strip-components=1
           rm -f "/tmp/Python-${VERSION}.tgz"
 
-          sudo mkdir -p "$DEST"
+          mkdir -p "$DEST"
           (
             cd "$BUILD_DIR"
             ./configure --prefix="$DEST" --enable-optimizations --with-ensurepip=install
             make -j"$(nproc)"
-            sudo make altinstall
+            make altinstall
           )
           rm -rf "$BUILD_DIR"
         fi
@@ -257,10 +285,10 @@ runs:
         # altinstall creates pythonX.Y, not python3 — symlink for convenience
         MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
         if [ ! -x "$DEST/bin/python3" ]; then
-          sudo ln -sf "$DEST/bin/python${MAJOR_MINOR}" "$DEST/bin/python3"
+          ln -sf "$DEST/bin/python${MAJOR_MINOR}" "$DEST/bin/python3"
         fi
         if [ ! -x "$DEST/bin/pip3" ]; then
-          sudo ln -sf "$DEST/bin/pip${MAJOR_MINOR}" "$DEST/bin/pip3"
+          ln -sf "$DEST/bin/pip${MAJOR_MINOR}" "$DEST/bin/pip3"
         fi
 
         echo "TOOLCHAIN_BIN=$DEST/bin" >> "$GITHUB_ENV"
