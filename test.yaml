@@ -1,114 +1,120 @@
-name: Multi-Ecosystem Deep Scan
+name: Diagnose Runner Environment
 
-on: [push, pull_request, workflow_dispatch]
+# One-off workflow to inspect what's available on the self-hosted runner
+# before deciding how to handle multi-ecosystem builds.
+# Trigger manually from the Actions tab, then read the job summary/logs.
+# Safe to delete after you've checked.
+
+on:
+  workflow_dispatch: {}
 
 jobs:
-  detect-ecosystem:
+  diagnose:
     runs-on: self-hosted
-    outputs:
-      ecosystem: ${{ steps.check-files.outputs.ecosystem }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Identify All Ecosystems
-        id: check-files
-        shell: bash
+      - name: Basic runner info
         run: |
-          set -euo pipefail
+          echo "## Runner OS / Arch"
+          uname -a
+          echo ""
+          echo "## Current user"
+          whoami
+          id
+          echo ""
+          echo "## Disk space"
+          df -h .
+          echo ""
+          echo "## Home / workspace"
+          echo "HOME=$HOME"
+          pwd
 
-          WORKSPACE_PATH="${GITHUB_WORKSPACE:-$PWD}"
-          echo "Deep-scanning workspace: $WORKSPACE_PATH"
-
-          ECOSYSTEMS=()
-
-          # find_file <pattern> - returns 0 if any file matching pattern exists
-          # Use -prune to skip common vendor/dependency directories entirely (much faster on large repos)
-          find_file() {
-            local pattern="$1"
-            find "$WORKSPACE_PATH" \
-              \( -type d \( -name "node_modules" -o -name "vendor" -o -name ".venv" -o -name ".git" -o -name ".terraform" \) -prune \) -o \
-              -type f -name "$pattern" -print -quit 2>/dev/null
-          }
-
-          add_unique() {
-            local val="$1"
-            for e in "${ECOSYSTEMS[@]}"; do
-              [[ "$e" == "$val" ]] && return
-            done
-            ECOSYSTEMS+=("$val")
-          }
-
-          # Node.js / JavaScript
-          if find_file package.json >/dev/null 2>&1 || find_file yarn.lock >/dev/null 2>&1 || find_file package-lock.json >/dev/null 2>&1; then
-            add_unique "nodejs"
+      - name: Check Docker
+        run: |
+          echo "## Docker"
+          if command -v docker >/dev/null 2>&1; then
+            docker --version
+            echo "--- Can current user run docker without sudo? ---"
+            docker ps >/dev/null 2>&1 && echo "YES - docker works" || echo "NO - permission denied or daemon not running"
+          else
+            echo "docker: NOT FOUND"
           fi
 
-          # Python
-          if find_file requirements.txt >/dev/null 2>&1 || find_file pyproject.toml >/dev/null 2>&1 || find_file setup.py >/dev/null 2>&1; then
-            add_unique "python"
+      - name: Check Node / npm / yarn / pnpm
+        run: |
+          echo "## Node ecosystem"
+          for cmd in node npm yarn pnpm nvm; do
+            if command -v "$cmd" >/dev/null 2>&1; then
+              echo "$cmd: $($cmd --version 2>&1 | head -1)"
+            else
+              echo "$cmd: NOT FOUND"
+            fi
+          done
+
+      - name: Check Python
+        run: |
+          echo "## Python ecosystem"
+          for cmd in python python3 pip pip3 poetry pyenv; do
+            if command -v "$cmd" >/dev/null 2>&1; then
+              echo "$cmd: $($cmd --version 2>&1 | head -1)"
+            else
+              echo "$cmd: NOT FOUND"
+            fi
+          done
+
+      - name: Check Java / Maven / Gradle
+        run: |
+          echo "## Java ecosystem"
+          for cmd in java javac mvn gradle; do
+            if command -v "$cmd" >/dev/null 2>&1; then
+              echo "$cmd: $($cmd -version 2>&1 | head -1)"
+            else
+              echo "$cmd: NOT FOUND"
+            fi
+          done
+          echo ""
+          echo "JAVA_HOME=$JAVA_HOME"
+          if command -v update-alternatives >/dev/null 2>&1; then
+            echo "--- Installed JDKs (update-alternatives) ---"
+            update-alternatives --list java 2>/dev/null || echo "none registered"
           fi
 
-          # Go
-          if find_file go.mod >/dev/null 2>&1; then
-            add_unique "go"
-          fi
+      - name: Check Go / Rust
+        run: |
+          echo "## Go / Rust"
+          for cmd in go cargo rustc; do
+            if command -v "$cmd" >/dev/null 2>&1; then
+              echo "$cmd: $($cmd version 2>&1 | head -1)"
+            else
+              echo "$cmd: NOT FOUND"
+            fi
+          done
 
-          # Rust
-          if find_file Cargo.toml >/dev/null 2>&1; then
-            add_unique "rust"
-          fi
+      - name: Check version managers (asdf, sdkman)
+        run: |
+          echo "## Version managers"
+          for cmd in asdf sdk; do
+            if command -v "$cmd" >/dev/null 2>&1; then
+              echo "$cmd: found"
+            else
+              echo "$cmd: NOT FOUND"
+            fi
+          done
+          [ -d "$HOME/.asdf" ] && echo "~/.asdf directory exists"
+          [ -d "$HOME/.sdkman" ] && echo "~/.sdkman directory exists"
 
-          # Ruby
-          if find_file Gemfile >/dev/null 2>&1; then
-            add_unique "ruby"
-          fi
+      - name: Check network / package registry access
+        run: |
+          echo "## Network access (matches your configured allowlist)"
+          for url in https://registry.npmjs.org https://pypi.org https://repo.maven.apache.org https://github.com; do
+            if curl -sSf -o /dev/null --max-time 5 "$url"; then
+              echo "$url: reachable"
+            else
+              echo "$url: NOT reachable"
+            fi
+          done
 
-          # Java (Maven/Gradle)
-          if find_file pom.xml >/dev/null 2>&1; then
-            add_unique "java-maven"
-          fi
-          if find_file build.gradle >/dev/null 2>&1 || find_file build.gradle.kts >/dev/null 2>&1; then
-            add_unique "java-gradle"
-          fi
-
-          # PHP
-          if find_file composer.json >/dev/null 2>&1; then
-            add_unique "php"
-          fi
-
-          # .NET
-          if find_file "*.csproj" >/dev/null 2>&1 || find_file global.json >/dev/null 2>&1; then
-            add_unique "dotnet"
-          fi
-
-          # Docker
-          if find_file Dockerfile >/dev/null 2>&1 || find_file docker-compose.yml >/dev/null 2>&1; then
-            add_unique "docker"
-          fi
-
-          # Kubernetes (manifests / kustomize)
-          if find_file kustomization.yml >/dev/null 2>&1 || find_file kustomization.yaml >/dev/null 2>&1 || find_file "*.k8s.yml" >/dev/null 2>&1 || find_file "*.k8s.yaml" >/dev/null 2>&1; then
-            add_unique "kubernetes"
-          fi
-
-          # Terraform
-          if find "$WORKSPACE_PATH" \( -type d \( -name "node_modules" -o -name "vendor" -o -name ".venv" -o -name ".git" -o -name ".terraform" \) -prune \) -o -type f -name '*.tf' -print -quit >/dev/null 2>&1; then
-            add_unique "terraform"
-          fi
-
-          # Detect monorepos / package managers by lockfiles
-          if find_file pnpm-lock.yaml >/dev/null 2>&1 || find_file pnpm-workspace.yaml >/dev/null 2>&1; then
-            add_unique "pnpm"
-          fi
-
-          # If nothing detected, mark as unknown
-          if [ ${#ECOSYSTEMS[@]} -eq 0 ]; then
-            add_unique "unknown"
-          fi
-
-          IFS=','; ECOSYSTEMS_CSV="${ECOSYSTEMS[*]}"; unset IFS
-          echo "Detected ecosystems: $ECOSYSTEMS_CSV"
-
-          # Export to GitHub Actions output (new recommended method)
-          echo "ecosystem=$ECOSYSTEMS_CSV" >> "$GITHUB_OUTPUT"
+      - name: Summary
+        run: |
+          echo "## Done"
+          echo "Review the logs above for each step to see what's pre-installed."
+          echo "Send these results back and the real workflow will be wired to match."
