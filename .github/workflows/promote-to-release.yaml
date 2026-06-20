@@ -132,8 +132,10 @@ jobs:
           fi
 
           # Ecosystem-based command defaults and the toolchain_id passed to
-          # .github/actions/setup-toolchain. Java splits into java-maven vs
-          # java-gradle since each needs a different build-tool install.
+          # .github/actions/setup-toolchain. detect-ecosystem now reports
+          # 'maven' and 'gradle' as distinct ecosystem values directly
+          # (rather than a combined 'java'), so no extra gradle-file check
+          # is needed here.
           case "$ECOSYSTEM" in
             node)
               ECO_INSTALL="npm ci"
@@ -145,16 +147,15 @@ jobs:
               ECO_BUILD="python -m build"
               TOOLCHAIN_ID="python"
               ;;
-            java)
-              if [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
-                ECO_INSTALL=""
-                ECO_BUILD="gradle build"
-                TOOLCHAIN_ID="java-gradle"
-              else
-                ECO_INSTALL=""
-                ECO_BUILD="mvn -B package"
-                TOOLCHAIN_ID="java-maven"
-              fi
+            maven)
+              ECO_INSTALL=""
+              ECO_BUILD="mvn -B package"
+              TOOLCHAIN_ID="java-maven"
+              ;;
+            gradle)
+              ECO_INSTALL=""
+              ECO_BUILD="gradle build"
+              TOOLCHAIN_ID="java-gradle"
               ;;
             go)
               ECO_INSTALL="go mod download"
