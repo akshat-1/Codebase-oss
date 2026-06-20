@@ -36,8 +36,9 @@ name: Build and Promote to Release
 # Maven/Gradle, Go, Rust, or Python built from source) is installed directly
 # on the runner via .github/actions/setup-toolchain, from official public
 # sources (nodejs.org, Adoptium, go.dev, rustup.rs, python.org). Installs are
-# cached under /opt/toolchains/<name>-<version> — if that exact version is
-# already present from a previous run, the download/install is skipped.
+# cached under $HOME/.toolchains/<name>-<version> (the runner account's own
+# home directory, no root/sudo needed) — if that exact version is already
+# present from a previous run, the download/install is skipped.
 #
 # IMPORTANT: the merge of PR branch + trigger branch happens only inside the
 # runner's local checkout, purely so the build sees what the code would look
@@ -53,15 +54,16 @@ name: Build and Promote to Release
 #
 # REQUIREMENTS PER REPO (manual, one-time, can't be done by copying files):
 #   1. A self-hosted runner must be registered to this repo or its org.
-#   2. setup-toolchain writes to /opt/toolchains and, for Python, installs
-#      system build deps (gcc, make, *-devel packages) via dnf/yum/apt/pacman
-#      directly, with no `sudo` calls — it assumes the runner's own account
-#      already has the needed permissions (e.g. runs as root, as confirmed
-#      via diagnose-runner.yml). If your runner account is NOT root and
-#      lacks write access to /opt and package-manager privileges, either
-#      grant passwordless sudo to that account and add `sudo` back into
-#      .github/actions/setup-toolchain, or switch to running the actual
-#      runner service as root.
+#   2. Node, Java/Maven, Java/Gradle, Go, and Rust install entirely under
+#      $HOME/.toolchains — whatever account the runner process runs as,
+#      no root or sudo is needed for these. Python is the one exception:
+#      building it from source needs system compiler/dev-library packages
+#      (gcc, make, *-devel) installed via dnf/yum/apt/pacman, which DOES
+#      require root — this will fail on a non-root runner account today.
+#      If you need Python support on a non-root runner, either pre-install
+#      those system packages once manually (with whatever access you do
+#      have), or let me know and we'll add a proper sudo/root path for
+#      just that step.
 #   3. If RELEASE_BRANCH has branch protection rules, confirm the token
 #      used here (default GITHUB_TOKEN, or a PAT in REPO_PAT secret) has
 #      permission to push branches and open PRs against it.

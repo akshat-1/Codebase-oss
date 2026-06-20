@@ -1,7 +1,7 @@
 name: Setup Toolchain
 description: >
   Installs the toolchain for a given ecosystem directly on the self-hosted
-  runner (no Docker), caching by exact version under /opt/toolchains so
+  runner (no Docker), caching by exact version under $HOME/.toolchains so
   repeat runs skip the download/install if already present. All downloads
   come from official public sources (Adoptium, nodejs.org, go.dev, rustup.rs,
   python.org). Node/Java/Maven/Gradle/Go/Rust use prebuilt tarballs (work on
@@ -61,7 +61,7 @@ runs:
       run: |
         set -e
         VERSION="${{ inputs.node_version }}"
-        DEST="/opt/toolchains/node-${VERSION}"
+        DEST="$HOME/.toolchains/node-${VERSION}"
 
         if [ -x "$DEST/bin/node" ] && [ "$("$DEST/bin/node" --version)" = "v${VERSION}" ]; then
           echo "Node ${VERSION} already installed at $DEST, skipping download"
@@ -87,7 +87,7 @@ runs:
       run: |
         set -e
         JAVA_VERSION="${{ inputs.java_version }}"
-        JAVA_DEST="/opt/toolchains/temurin-${JAVA_VERSION}"
+        JAVA_DEST="$HOME/.toolchains/temurin-${JAVA_VERSION}"
 
         if [ -x "$JAVA_DEST/bin/java" ]; then
           echo "Temurin JDK ${JAVA_VERSION} already installed at $JAVA_DEST, skipping download"
@@ -109,7 +109,7 @@ runs:
       run: |
         set -e
         MVN_VERSION="${{ inputs.maven_version }}"
-        MVN_DEST="/opt/toolchains/maven-${MVN_VERSION}"
+        MVN_DEST="$HOME/.toolchains/maven-${MVN_VERSION}"
 
         if [ -x "$MVN_DEST/bin/mvn" ]; then
           echo "Maven ${MVN_VERSION} already installed at $MVN_DEST, skipping download"
@@ -131,7 +131,7 @@ runs:
       run: |
         set -e
         GRADLE_VERSION="${{ inputs.gradle_version }}"
-        GRADLE_DEST="/opt/toolchains/gradle-${GRADLE_VERSION}"
+        GRADLE_DEST="$HOME/.toolchains/gradle-${GRADLE_VERSION}"
 
         if [ -x "$GRADLE_DEST/bin/gradle" ]; then
           echo "Gradle ${GRADLE_VERSION} already installed at $GRADLE_DEST, skipping download"
@@ -157,7 +157,7 @@ runs:
       run: |
         set -e
         VERSION="${{ inputs.go_version }}"
-        DEST="/opt/toolchains/go-${VERSION}"
+        DEST="$HOME/.toolchains/go-${VERSION}"
 
         if [ -x "$DEST/go/bin/go" ]; then
           echo "Go ${VERSION} already installed at $DEST, skipping download"
@@ -183,7 +183,7 @@ runs:
       run: |
         set -e
         VERSION="${{ inputs.rust_version }}"
-        DEST="/opt/toolchains/rust-${VERSION}"
+        DEST="$HOME/.toolchains/rust-${VERSION}"
 
         if [ -x "$DEST/cargo/bin/cargo" ]; then
           echo "Rust ${VERSION} already installed at $DEST, skipping download"
@@ -258,7 +258,7 @@ runs:
       run: |
         set -e
         VERSION="${{ inputs.python_version }}"
-        DEST="/opt/toolchains/python-${VERSION}"
+        DEST="$HOME/.toolchains/python-${VERSION}"
 
         if [ -x "$DEST/bin/python3" ]; then
           echo "Python ${VERSION} already installed at $DEST, skipping build"
