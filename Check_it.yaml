@@ -1,0 +1,47 @@
+name: Check Artifactory Access
+
+# One-off diagnostic: tests whether THIS runner's network position gets
+# unauthenticated access to Artifactory (the way the Dockerfile build does,
+# per corporate VPN/IP trust), or whether a token is required from here.
+# Safe to delete after checking. Replace the URL below with your actual
+# Artifactory host/path if it differs from what's hardcoded here.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check-artifactory:
+    runs-on: self-hosted
+    steps:
+      - name: Test unauthenticated download
+        run: |
+          set -e
+
+          URL="https://Company_name/artifactory/node-dist/v20.18.1/node-v20.18.1-linux-x64.tar.gz"
+
+          echo "## Attempting unauthenticated download"
+          echo "URL: $URL"
+          curl -k --max-time 120 -w "\nHTTP status: %{http_code}\n" \
+            "$URL" \
+            -o /tmp/node-test.tgz
+
+          echo ""
+          echo "## File size"
+          ls -lh /tmp/node-test.tgz
+
+          echo ""
+          echo "## File type (should say 'gzip compressed data' if real;"
+          echo "## 'HTML document' or 'ASCII text' means we got an error/login page)"
+          file /tmp/node-test.tgz
+
+          echo ""
+          echo "## First 20 lines if it looks like text (helps spot login pages)"
+          if file /tmp/node-test.tgz | grep -qi "text\|html"; then
+            head -20 /tmp/node-test.tgz
+          else
+            echo "(binary file, skipping preview — looks correct)"
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: rm -f /tmp/node-test.tgz
