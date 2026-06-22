@@ -1,0 +1,355 @@
+name: Build Check
+
+# STAGE 1 of 2 in this repo's build-and-promote pipeline. See
+# .github/README.md for the full design rationale.
+#
+# This workflow is intentionally UNTRUSTED and SECRET-FREE. It triggers on
+# every pull_request (human-opened or Dependabot-opened) targeting the
+# configured trigger branch, merges the PR locally (never pushed anywhere),
+# installs the right toolchain, and runs the build. It does nothing else —
+# no git push, no PR creation, no secrets, no write-capable token.
+#
+# This is deliberate: GitHub does not pass repo secrets or a write-capable
+# GITHUB_TOKEN to pull_request-triggered runs for PRs from Dependabot (and
+# from forks), as a supply-chain safety measure. This workflow needs none
+# of that, so it runs identically and safely regardless of who opened the
+# PR.
+#
+# The actual promotion (pushing a branch, opening a PR against the release
+# branch) happens in the separate, trusted promote.yml workflow, which only
+# runs AFTER this one completes successfully — see that file for why the
+# split exists and how the handoff works.
+#
+# permissions are explicitly read-only here. Do not add write permissions
+# or any secrets to this file — that would defeat the entire reason for
+# splitting build and promote into two workflows.
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - '**'   # we filter against TRIGGER_BRANCH at runtime, see first job
+
+jobs:
+  resolve-config:
+    runs-on: self-hosted
+    outputs:
+      trigger_branch: ${{ steps.config.outputs.trigger_branch }}
+      build_command: ${{ steps.config.outputs.build_command }}
+      install_command: ${{ steps.config.outputs.install_command }}
+      toolchain_id: ${{ steps.config.outputs.toolchain_id }}
+      node_version: ${{ steps.config.outputs.node_version }}
+      python_version: ${{ steps.config.outputs.python_version }}
+      java_version: ${{ steps.config.outputs.java_version }}
+      maven_version: ${{ steps.config.outputs.maven_version }}
+      gradle_version: ${{ steps.config.outputs.gradle_version }}
+      go_version: ${{ steps.config.outputs.go_version }}
+      rust_version: ${{ steps.config.outputs.rust_version }}
+      ecosystem: ${{ steps.detect.outputs.ecosystem }}
+      should_run: ${{ steps.config.outputs.should_run }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect ecosystem
+        id: detect
+        uses: ./.github/actions/detect-ecosystem
+
+      - name: Resolve configuration
+        id: config
+        env:
+          VAR_TRIGGER_BRANCH: ${{ vars.TRIGGER_BRANCH }}
+          VAR_BUILD_COMMAND: ${{ vars.BUILD_COMMAND }}
+          VAR_INSTALL_COMMAND: ${{ vars.INSTALL_COMMAND }}
+          VAR_NODE_VERSION: ${{ vars.NODE_VERSION }}
+          VAR_PYTHON_VERSION: ${{ vars.PYTHON_VERSION }}
+          VAR_JAVA_VERSION: ${{ vars.JAVA_VERSION }}
+          VAR_MAVEN_VERSION: ${{ vars.MAVEN_VERSION }}
+          VAR_GRADLE_VERSION: ${{ vars.GRADLE_VERSION }}
+          VAR_GO_VERSION: ${{ vars.GO_VERSION }}
+          VAR_RUST_VERSION: ${{ vars.RUST_VERSION }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          ECOSYSTEM: ${{ steps.detect.outputs.ecosystem }}
+        run: |
+          set -e
+
+          CONFIG_FILE=".github/promote-config.yml"
+          FILE_TRIGGER_BRANCH=""
+          FILE_BUILD_COMMAND=""
+          FILE_INSTALL_COMMAND=""
+          FILE_NODE_VERSION=""
+          FILE_PYTHON_VERSION=""
+          FILE_JAVA_VERSION=""
+          FILE_MAVEN_VERSION=""
+          FILE_GRADLE_VERSION=""
+          FILE_GO_VERSION=""
+          FILE_RUST_VERSION=""
+
+          if [ -f "$CONFIG_FILE" ]; then
+            echo "Found $CONFIG_FILE, using as fallback source"
+            FILE_TRIGGER_BRANCH=$(yq -r '.trigger_branch // ""' "$CONFIG_FILE" 2>/dev/null || true)
+            FILE_BUILD_COMMAND=$(yq -r '.build_command // ""' "$CONFIG_FILE" 2>/dev/null || true)
+            FILE_INSTALL_COMMAND=$(yq -r '.install_command // ""' "$CONFIG_FILE" 2>/dev/null || true)
+            FILE_NODE_VERSION=$(yq -r '.node_version // ""' "$CONFIG_FILE" 2>/dev/null || true)
+            FILE_PYTHON_VERSION=$(yq -r '.python_version // ""' "$CONFIG_FILE" 2>/dev/null || true)
+            FILE_JAVA_VERSION=$(yq -r '.java_version // ""' "$CONFIG_FILE" 2>/dev/null || true)
+            FILE_MAVEN_VERSION=$(yq -r '.maven_version // ""' "$CONFIG_FILE" 2>/dev/null || true)
+            FILE_GRADLE_VERSION=$(yq -r '.gradle_version // ""' "$CONFIG_FILE" 2>/dev/null || true)
+            FILE_GO_VERSION=$(yq -r '.go_version // ""' "$CONFIG_FILE" 2>/dev/null || true)
+            FILE_RUST_VERSION=$(yq -r '.rust_version // ""' "$CONFIG_FILE" 2>/dev/null || true)
+          fi
+
+          # --------------------------------------------------------------
+          # Auto-detect language versions directly from the codebase.
+          # Uses plain `grep -E` (POSIX ERE only, no PCRE) since this runs
+          # on a minimal RHEL runner where `grep -P` support isn't
+          # guaranteed. These are best-effort: if a file doesn't match any
+          # known pattern, the detected value stays empty and the priority
+          # chain below falls through to the hardcoded default instead.
+          # This detection only ever fills a gap — an explicit repo
+          # variable or promote-config.yml value always wins over it.
+          # --------------------------------------------------------------
+          DETECTED_JAVA_VERSION=""
+          DETECTED_NODE_VERSION=""
+          DETECTED_GO_VERSION=""
+
+          if [ -f "pom.xml" ]; then
+            RAW=$(grep -oE '<maven\.compiler\.(source|target)>[0-9._]+' pom.xml 2>/dev/null | grep -oE '[0-9._]+$' | head -1)
+            if [ -z "$RAW" ]; then
+              RAW=$(grep -oE '<java\.version>[0-9._]+' pom.xml 2>/dev/null | grep -oE '[0-9._]+$' | head -1)
+            fi
+            if [ -z "$RAW" ]; then
+              RAW=$(grep -oE '<release>[0-9._]+' pom.xml 2>/dev/null | grep -oE '[0-9._]+$' | head -1)
+            fi
+            if [ -n "$RAW" ]; then
+              DETECTED_JAVA_VERSION="$RAW"
+            fi
+          fi
+
+          if [ -z "$DETECTED_JAVA_VERSION" ]; then
+            for GRADLE_FILE in build.gradle build.gradle.kts; do
+              [ -f "$GRADLE_FILE" ] || continue
+              RAW=$(grep -oE "sourceCompatibility[[:space:]]*=[[:space:]]*['\"]?[0-9._]+" "$GRADLE_FILE" 2>/dev/null | grep -oE '[0-9._]+$' | head -1)
+              if [ -z "$RAW" ]; then
+                RAW=$(grep -oE 'JavaLanguageVersion\.of\([0-9]+' "$GRADLE_FILE" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+              fi
+              if [ -n "$RAW" ]; then
+                DETECTED_JAVA_VERSION="$RAW"
+                break
+              fi
+            done
+          fi
+
+          # Normalize legacy "1.8" style notation to "8", and strip any
+          # trailing minor/patch (e.g. "17.0.2" -> "17") since Adoptium's
+          # API in setup-toolchain expects a bare major version.
+          if [ -n "$DETECTED_JAVA_VERSION" ]; then
+            case "$DETECTED_JAVA_VERSION" in
+              1.*) DETECTED_JAVA_VERSION="${DETECTED_JAVA_VERSION#1.}" ;;
+            esac
+            DETECTED_JAVA_VERSION=$(echo "$DETECTED_JAVA_VERSION" | grep -oE '^[0-9]+')
+          fi
+
+          if [ -f "package.json" ]; then
+            RAW=$(grep -oE '"node"[[:space:]]*:[[:space:]]*"[^"]*"' package.json 2>/dev/null | grep -oE '[0-9]+' | head -1)
+            if [ -n "$RAW" ]; then
+              DETECTED_NODE_VERSION="$RAW"
+            fi
+          fi
+
+          if [ -f "go.mod" ]; then
+            RAW=$(grep -oE '^go [0-9]+\.[0-9]+' go.mod 2>/dev/null | grep -oE '[0-9]+\.[0-9]+$' | head -1)
+            if [ -n "$RAW" ]; then
+              DETECTED_GO_VERSION="$RAW"
+            fi
+          fi
+
+          echo "Detected from codebase: java_version=$DETECTED_JAVA_VERSION node_version=$DETECTED_NODE_VERSION go_version=$DETECTED_GO_VERSION"
+
+          case "$ECOSYSTEM" in
+            node)
+              ECO_INSTALL="npm ci"
+              ECO_BUILD="npm run build"
+              TOOLCHAIN_ID="node"
+              ;;
+            python)
+              ECO_INSTALL="pip install -r requirements.txt"
+              ECO_BUILD="python -m build"
+              TOOLCHAIN_ID="python"
+              ;;
+            maven)
+              ECO_INSTALL=""
+              ECO_BUILD="mvn -B package"
+              TOOLCHAIN_ID="java-maven"
+              ;;
+            gradle)
+              ECO_INSTALL=""
+              ECO_BUILD="gradle build"
+              TOOLCHAIN_ID="java-gradle"
+              ;;
+            go)
+              ECO_INSTALL="go mod download"
+              ECO_BUILD="go build ./..."
+              TOOLCHAIN_ID="go"
+              ;;
+            rust)
+              ECO_INSTALL=""
+              ECO_BUILD="cargo build --release"
+              TOOLCHAIN_ID="rust"
+              ;;
+            *)
+              ECO_INSTALL=""
+              ECO_BUILD=""
+              TOOLCHAIN_ID=""
+              ;;
+          esac
+
+          TRIGGER_BRANCH="${VAR_TRIGGER_BRANCH:-${FILE_TRIGGER_BRANCH:-main}}"
+          BUILD_COMMAND="${VAR_BUILD_COMMAND:-${FILE_BUILD_COMMAND:-$ECO_BUILD}}"
+          INSTALL_COMMAND="${VAR_INSTALL_COMMAND:-${FILE_INSTALL_COMMAND:-$ECO_INSTALL}}"
+
+          NODE_VERSION="${VAR_NODE_VERSION:-${FILE_NODE_VERSION:-${DETECTED_NODE_VERSION:-20.18.1}}}"
+          PYTHON_VERSION="${VAR_PYTHON_VERSION:-${FILE_PYTHON_VERSION:-3.12.7}}"
+          JAVA_VERSION="${VAR_JAVA_VERSION:-${FILE_JAVA_VERSION:-${DETECTED_JAVA_VERSION:-21}}}"
+          MAVEN_VERSION="${VAR_MAVEN_VERSION:-${FILE_MAVEN_VERSION:-3.9.9}}"
+          GRADLE_VERSION="${VAR_GRADLE_VERSION:-${FILE_GRADLE_VERSION:-8.10.2}}"
+          GO_VERSION="${VAR_GO_VERSION:-${FILE_GO_VERSION:-${DETECTED_GO_VERSION:-1.22.9}}}"
+          RUST_VERSION="${VAR_RUST_VERSION:-${FILE_RUST_VERSION:-stable}}"
+
+          if [ -z "$BUILD_COMMAND" ]; then
+            echo "::error::No build command resolved. Detected ecosystem '$ECOSYSTEM' has no default, and BUILD_COMMAND repo variable / promote-config.yml build_command is unset."
+            exit 1
+          fi
+
+          if [ -z "$TOOLCHAIN_ID" ]; then
+            echo "::error::Detected ecosystem '$ECOSYSTEM' has no matching toolchain installer. Add one to .github/actions/setup-toolchain, or set BUILD_COMMAND/INSTALL_COMMAND repo variables and ensure the required tools are already on the runner's PATH."
+            exit 1
+          fi
+
+          echo "Detected ecosystem: $ECOSYSTEM (toolchain_id: $TOOLCHAIN_ID)"
+          echo "Resolved trigger_branch=$TRIGGER_BRANCH"
+          echo "Resolved build_command=$BUILD_COMMAND"
+          echo "Resolved install_command=$INSTALL_COMMAND"
+          echo "Resolved java_version=$JAVA_VERSION (auto-detected: ${DETECTED_JAVA_VERSION:-none})"
+          echo "Resolved node_version=$NODE_VERSION (auto-detected: ${DETECTED_NODE_VERSION:-none})"
+          echo "Resolved go_version=$GO_VERSION (auto-detected: ${DETECTED_GO_VERSION:-none})"
+
+          SHOULD_RUN="false"
+          if [ "$PR_BASE_REF" = "$TRIGGER_BRANCH" ]; then
+            SHOULD_RUN="true"
+          else
+            echo "PR base ref '$PR_BASE_REF' does not match trigger branch '$TRIGGER_BRANCH', skipping"
+          fi
+
+          {
+            echo "trigger_branch=$TRIGGER_BRANCH"
+            echo "install_command=$INSTALL_COMMAND"
+            echo "toolchain_id=$TOOLCHAIN_ID"
+            echo "node_version=$NODE_VERSION"
+            echo "python_version=$PYTHON_VERSION"
+            echo "java_version=$JAVA_VERSION"
+            echo "maven_version=$MAVEN_VERSION"
+            echo "gradle_version=$GRADLE_VERSION"
+            echo "go_version=$GO_VERSION"
+            echo "rust_version=$RUST_VERSION"
+            echo "should_run=$SHOULD_RUN"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "build_command<<BUILD_CMD_EOF"
+            echo "$BUILD_COMMAND"
+            echo "BUILD_CMD_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve-config
+    if: needs.resolve-config.outputs.should_run == 'true'
+    runs-on: self-hosted
+
+    env:
+      TRIGGER_BRANCH: ${{ needs.resolve-config.outputs.trigger_branch }}
+      BUILD_COMMAND: ${{ needs.resolve-config.outputs.build_command }}
+      INSTALL_COMMAND: ${{ needs.resolve-config.outputs.install_command }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+
+    steps:
+      # No token: input here — checkout uses the default read-only token,
+      # which is all this workflow is permitted to have (see permissions:
+      # at the top of this file).
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch and merge PR branch locally
+        id: local_merge
+        run: |
+          set -e
+
+          git fetch origin "$TRIGGER_BRANCH"
+          git checkout -B "$TRIGGER_BRANCH" "origin/$TRIGGER_BRANCH"
+
+          # PRs from a fork (or from Dependabot, which uses a fork-like
+          # head in some configurations) have a different head repo than
+          # this one — fetch from the correct remote either way.
+          if [ "$PR_HEAD_REPO_FULL_NAME" = "$GITHUB_REPOSITORY" ]; then
+            git fetch origin "$PR_HEAD_REF"
+            MERGE_REF="origin/$PR_HEAD_REF"
+          else
+            git fetch "https://github.com/${PR_HEAD_REPO_FULL_NAME}.git" "$PR_HEAD_REF"
+            MERGE_REF="FETCH_HEAD"
+          fi
+
+          echo "Merging PR #$PR_NUMBER ($PR_HEAD_REF @ $PR_HEAD_SHA) into local $TRIGGER_BRANCH"
+          echo "This merge is local only — it is never pushed back to $TRIGGER_BRANCH."
+
+          git merge --no-ff --no-edit "$MERGE_REF" -m "Local merge check: PR #$PR_NUMBER into $TRIGGER_BRANCH"
+
+          echo "Local merge result:"
+          git log -1 --oneline
+
+      - name: Setup toolchain
+        id: toolchain
+        uses: ./.github/actions/setup-toolchain
+        with:
+          ecosystem: ${{ needs.resolve-config.outputs.toolchain_id }}
+          node_version: ${{ needs.resolve-config.outputs.node_version }}
+          python_version: ${{ needs.resolve-config.outputs.python_version }}
+          java_version: ${{ needs.resolve-config.outputs.java_version }}
+          maven_version: ${{ needs.resolve-config.outputs.maven_version }}
+          gradle_version: ${{ needs.resolve-config.outputs.gradle_version }}
+          go_version: ${{ needs.resolve-config.outputs.go_version }}
+          rust_version: ${{ needs.resolve-config.outputs.rust_version }}
+
+      - name: Install dependencies
+        if: env.INSTALL_COMMAND != ''
+        run: |
+          set -e
+          export PATH="${TOOLCHAIN_BIN}:${PATH}"
+          eval "$INSTALL_COMMAND"
+
+      - name: Run build
+        id: build
+        run: |
+          set -e
+          export PATH="${TOOLCHAIN_BIN}:${PATH}"
+          eval "$BUILD_COMMAND"
+
+      # No promotion happens here. promote.yml picks up from this point,
+      # triggered by workflow_run after this workflow finishes, and
+      # determines success/failure via the GitHub API rather than any
+      # output from this job (workflow_run cannot read job outputs from
+      # the triggering workflow directly).
