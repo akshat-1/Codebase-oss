@@ -1,0 +1,189 @@
+version: 2
+
+# SECURITY UPDATES ONLY — see notes further down. Every ecosystem below has
+# open-pull-requests-limit: 0, disabling "bump to latest" version updates.
+# PRs are only opened by Dependabot SECURITY UPDATES (triggered by a real
+# Dependabot alert / known CVE), proposing the minimum patched version.
+#
+# MULTIPLE REGISTRIES PER ECOSYSTEM: each ecosystem below may need several
+# distinct Artifactory repos checked (e.g. a local/internal repo, a public
+# proxy, a plugins-specific repo) — these are genuinely different content,
+# not redundant mirrors, so each gets its own named entry under the
+# top-level registries: block, and ALL of them are listed in that
+# ecosystem's updates: registries: array. Dependabot checks every listed
+# registry for each dependency. See:
+# https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference
+#
+# FILL IN, per registry below: REPLACE_ME_HOST, REPLACE_ME_<ECOSYSTEM>_REPO
+# (the Artifactory repo path), REPLACE_ME_USERNAME, and create the matching
+# secret under Settings > Secrets and variables > Dependabot. Add or remove
+# registry entries (and their references in the updates: registries: list
+# below) to match exactly how many your Renovate config actually has per
+# ecosystem — the count here is a starting placeholder, not a fixed number.
+#
+# IMPORTANT — GHES-SPECIFIC REQUIREMENTS NOT COVERED BY THIS FILE ALONE:
+#   1. Your GHES instance's enterprise/site admin must have already set up
+#      Dependabot for the instance (requires GitHub Actions with
+#      self-hosted runners on GHES — an instance-wide admin step).
+#   2. Given everything routes through Artifactory rather than the open
+#      internet, confirm with your GHES admin whether the separate
+#      "limited/no internet access" Dependabot configuration path has been
+#      set up — without it, Dependabot's own update-checking job may not
+#      have network access to function.
+#   3. Historically, Dependabot SECURITY updates (not version updates) had
+#      a known bug where private registry config in this file was ignored
+#      entirely. GitHub says this was fixed, but the exact GHES version
+#      cutoff isn't confirmed here — test directly (trigger a real
+#      security-update PR, confirm the proposed version is
+#      Artifactory-sourced) rather than assuming from this file alone.
+#
+# IMPORTANT — security updates do NOT support target-branch (confirmed in
+# GitHub's own docs: including target-branch in an update block breaks
+# that block's private-registry config specifically for security updates).
+# None of the blocks below set target-branch for this reason.
+registries:
+  # ---------------------------------------------------------------------
+  # npm — multiple registries, exact list/names/purposes to be filled in
+  # ---------------------------------------------------------------------
+  npm-registry-1:
+    type: npm-registry
+    url: https://REPLACE_ME_HOST/artifactory/api/npm/REPLACE_ME_NPM_REPO_1
+    username: REPLACE_ME_USERNAME
+    password: ${{secrets.ARTIFACTORY_NPM_1_PASSWORD}}
+    replaces-base: true
+  npm-registry-2:
+    type: npm-registry
+    url: https://REPLACE_ME_HOST/artifactory/api/npm/REPLACE_ME_NPM_REPO_2
+    username: REPLACE_ME_USERNAME
+    password: ${{secrets.ARTIFACTORY_NPM_2_PASSWORD}}
+    replaces-base: true
+
+  # ---------------------------------------------------------------------
+  # Maven — confirmed three: mvn-public-local, mvn-central, mvn-plugins-release
+  # ---------------------------------------------------------------------
+  mvn-public-local:
+    type: maven-repository
+    url: https://REPLACE_ME_HOST/artifactory/REPLACE_ME_MVN_PUBLIC_LOCAL_PATH
+    username: REPLACE_ME_USERNAME
+    password: ${{secrets.ARTIFACTORY_MVN_PUBLIC_LOCAL_PASSWORD}}
+    replaces-base: true
+  mvn-central:
+    type: maven-repository
+    url: https://REPLACE_ME_HOST/artifactory/REPLACE_ME_MVN_CENTRAL_PATH
+    username: REPLACE_ME_USERNAME
+    password: ${{secrets.ARTIFACTORY_MVN_CENTRAL_PASSWORD}}
+    replaces-base: true
+  mvn-plugins-release:
+    type: maven-repository
+    url: https://REPLACE_ME_HOST/artifactory/REPLACE_ME_MVN_PLUGINS_RELEASE_PATH
+    username: REPLACE_ME_USERNAME
+    password: ${{secrets.ARTIFACTORY_MVN_PLUGINS_RELEASE_PASSWORD}}
+    replaces-base: true
+
+  # ---------------------------------------------------------------------
+  # Gradle — different/fewer registries than Maven per Renovate config,
+  # exact list to be filled in. Also maven-repository type (Dependabot
+  # doesn't run Gradle directly, but supports build-file version updates
+  # via Maven-protocol registry lookups).
+  # ---------------------------------------------------------------------
+  gradle-registry-1:
+    type: maven-repository
+    url: https://REPLACE_ME_HOST/artifactory/REPLACE_ME_GRADLE_REPO_1
+    username: REPLACE_ME_USERNAME
+    password: ${{secrets.ARTIFACTORY_GRADLE_1_PASSWORD}}
+    replaces-base: true
+
+  # ---------------------------------------------------------------------
+  # pip — multiple registries, exact list/names/purposes to be filled in
+  # ---------------------------------------------------------------------
+  pip-registry-1:
+    type: python-index
+    # IMPORTANT: verify exact path against Artifactory's "Set Me Up" panel
+    # for this repo — a known Dependabot issue means an incorrect path can
+    # silently 404 even with replaces-base set correctly.
+    url: https://REPLACE_ME_HOST/artifactory/api/pypi/REPLACE_ME_PIP_REPO_1/simple
+    username: REPLACE_ME_USERNAME
+    password: ${{secrets.ARTIFACTORY_PIP_1_PASSWORD}}
+    replaces-base: true
+  pip-registry-2:
+    type: python-index
+    url: https://REPLACE_ME_HOST/artifactory/api/pypi/REPLACE_ME_PIP_REPO_2/simple
+    username: REPLACE_ME_USERNAME
+    password: ${{secrets.ARTIFACTORY_PIP_2_PASSWORD}}
+    replaces-base: true
+
+  # ---------------------------------------------------------------------
+  # Go — multiple registries, exact list/names/purposes to be filled in
+  # ---------------------------------------------------------------------
+  go-registry-1:
+    type: goproxy-server
+    url: https://REPLACE_ME_HOST/artifactory/api/go/REPLACE_ME_GO_REPO_1
+    username: REPLACE_ME_USERNAME
+    password: ${{secrets.ARTIFACTORY_GO_1_PASSWORD}}
+  go-registry-2:
+    type: goproxy-server
+    url: https://REPLACE_ME_HOST/artifactory/api/go/REPLACE_ME_GO_REPO_2
+    username: REPLACE_ME_USERNAME
+    password: ${{secrets.ARTIFACTORY_GO_2_PASSWORD}}
+
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    registries:
+      - npm-registry-1
+      - npm-registry-2
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: "maven"
+    directory: "/"
+    registries:
+      - mvn-public-local
+      - mvn-central
+      - mvn-plugins-release
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: "gradle"
+    directory: "/"
+    registries:
+      - gradle-registry-1
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    registries:
+      - pip-registry-1
+      - pip-registry-2
+    # Required by Dependabot when a registries: block is attached to pip —
+    # pip's update process can execute code from the manifest (e.g.
+    # setup.py), and Dependabot refuses to proceed without this explicit
+    # acknowledgement. Scope is limited to the registries listed in this
+    # update block only. Applies to security updates too.
+    insecure-external-code-execution: allow
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: "gomod"
+    directory: "/"
+    registries:
+      - go-registry-1
+      - go-registry-2
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 0
+
+  # GitHub Actions — not detected by detect-ecosystem, but worth keeping
+  # the pipeline's own action versions patched against known
+  # vulnerabilities. No Artifactory registry for this (Actions aren't
+  # mirrored), so not restricted to Artifactory-only versions.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 0
