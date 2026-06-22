@@ -1,0 +1,234 @@
+name: Promote to Release
+
+# STAGE 2 of 2. See .github/README.md and build-check.yml for the full
+# design rationale behind this split.
+#
+# This workflow is TRUSTED: it has write access (via REPO_PAT or the
+# default GITHUB_TOKEN) and can push branches / open PRs. It is triggered
+# by workflow_run, which only fires AFTER build-check.yml has completely
+# finished — meaning all untrusted code (the PR's own contents, build
+# scripts, etc.) has already run to completion under build-check.yml's
+# restricted, secret-free permissions before this workflow even starts.
+#
+# This workflow itself never checks out or executes anything from the PR
+# branch's code — it only performs git/GitHub mechanics (fetch, merge,
+# push, open PR) using branch names and metadata recovered from the
+# triggering run via the GitHub API. This is what makes it safe to grant
+# this workflow elevated permissions even though the originating PR (e.g.
+# from Dependabot) is not itself trusted: workflow_run always uses the
+# workflow file as it exists on the repo's default branch, not whatever
+# might be on the PR's branch, so a malicious PR cannot modify this
+# workflow to abuse its permissions.
+#
+# IMPORTANT: workflow_run events do NOT include github.event.pull_request
+# context — that only exists for pull_request-triggered events. The PR
+# number, head branch, head SHA, and head repo must be recovered via the
+# GitHub API using the triggering run's ID instead. See "Resolve PR
+# context" below.
+
+on:
+  workflow_run:
+    workflows: ["Build Check"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  promote:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: self-hosted
+
+    env:
+      GH_TOKEN: ${{ secrets.REPO_PAT || secrets.GITHUB_TOKEN }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.REPO_PAT || secrets.GITHUB_TOKEN }}
+          clean: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Ensure gh CLI is available
+        run: |
+          set -e
+
+          if command -v gh >/dev/null 2>&1; then
+            echo "gh already installed: $(gh --version | head -1)"
+          else
+            echo "gh not found on PATH, installing a local copy under \$HOME/.toolchains"
+            GH_VERSION="2.63.2"
+            case "$(uname -m)" in
+              x86_64) GH_ARCH="amd64" ;;
+              aarch64|arm64) GH_ARCH="arm64" ;;
+              *)
+                echo "::error::Unsupported architecture $(uname -m) for gh CLI auto-install. Install gh manually on this runner."
+                exit 1
+                ;;
+            esac
+            GH_DEST="$HOME/.toolchains/gh-${GH_VERSION}"
+
+            if [ -x "$GH_DEST/bin/gh" ]; then
+              echo "Found cached gh ${GH_VERSION} at $GH_DEST, skipping download"
+            else
+              mkdir -p "$GH_DEST"
+              TARBALL="gh_${GH_VERSION}_linux_${GH_ARCH}.tar.gz"
+              curl -fsSL -o "/tmp/${TARBALL}" \
+                "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${TARBALL}"
+              tar -xzf "/tmp/${TARBALL}" -C "$GH_DEST" --strip-components=1
+              rm -f "/tmp/${TARBALL}"
+            fi
+
+            echo "$GH_DEST/bin" >> "$GITHUB_PATH"
+            echo "Installed gh ${GH_VERSION} to $GH_DEST (added to PATH for remaining steps)"
+          fi
+
+      - name: Resolve PR context from the triggering run
+        id: pr_context
+        run: |
+          set -e
+
+          # workflow_run does not expose github.event.pull_request, so the
+          # PR is recovered via the API using the triggering run's own
+          # pull_requests field. This field can be empty for PRs from
+          # forks (which includes some Dependabot configurations) — in
+          # that case, fall back to matching on head SHA via the repo's
+          # open PR list instead.
+          PR_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq '.pull_requests[0] // empty')
+
+          if [ -n "$PR_JSON" ]; then
+            PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number')
+          else
+            HEAD_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq '.head_sha')
+            HEAD_BRANCH=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq '.head_branch')
+            echo "No pull_requests[] on the run object (common for fork/Dependabot PRs) — matching by head_sha instead"
+            PR_NUMBER=$(gh pr list --state open --json number,headRefOid --jq \
+              ".[] | select(.headRefOid == \"${HEAD_SHA}\") | .number" | head -1)
+          fi
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::error::Could not resolve a PR number for run ${RUN_ID}. Nothing to promote."
+            exit 1
+          fi
+
+          PR_DATA=$(gh pr view "$PR_NUMBER" --json title,author,headRefName,headRepository,headRepositoryOwner,baseRefName,headRefOid)
+
+          {
+            echo "pr_number=$PR_NUMBER"
+            echo "pr_title=$(echo "$PR_DATA" | jq -r '.title')"
+            echo "pr_author=$(echo "$PR_DATA" | jq -r '.author.login')"
+            echo "pr_head_ref=$(echo "$PR_DATA" | jq -r '.headRefName')"
+            echo "pr_head_sha=$(echo "$PR_DATA" | jq -r '.headRefOid')"
+            echo "pr_head_repo_full_name=$(echo "$PR_DATA" | jq -r '.headRepositoryOwner.login')/$(echo "$PR_DATA" | jq -r '.headRepository.name')"
+            echo "trigger_branch=$(echo "$PR_DATA" | jq -r '.baseRefName')"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved PR #$PR_NUMBER for run $RUN_ID"
+
+      - name: Resolve release branch
+        id: release_config
+        env:
+          VAR_RELEASE_BRANCH: ${{ vars.RELEASE_BRANCH }}
+        run: |
+          set -e
+          CONFIG_FILE=".github/promote-config.yml"
+          FILE_RELEASE_BRANCH=""
+          if [ -f "$CONFIG_FILE" ]; then
+            FILE_RELEASE_BRANCH=$(yq -r '.release_branch // ""' "$CONFIG_FILE" 2>/dev/null || true)
+          fi
+          RELEASE_BRANCH="${VAR_RELEASE_BRANCH:-${FILE_RELEASE_BRANCH:-release}}"
+          echo "release_branch=$RELEASE_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Resolved release_branch=$RELEASE_BRANCH"
+
+      - name: Create promotion branch from release
+        env:
+          RELEASE_BRANCH: ${{ steps.release_config.outputs.release_branch }}
+          PR_NUMBER: ${{ steps.pr_context.outputs.pr_number }}
+          PR_HEAD_REF: ${{ steps.pr_context.outputs.pr_head_ref }}
+          PR_HEAD_REPO_FULL_NAME: ${{ steps.pr_context.outputs.pr_head_repo_full_name }}
+        run: |
+          set -e
+          git fetch origin "$RELEASE_BRANCH"
+
+          BRANCH_NAME="promote/pr-${PR_NUMBER}"
+          echo "BRANCH_NAME=$BRANCH_NAME" >> "$GITHUB_ENV"
+
+          git branch -D "$BRANCH_NAME" 2>/dev/null || true
+          git checkout -b "$BRANCH_NAME" "origin/$RELEASE_BRANCH"
+
+          if [ "$PR_HEAD_REPO_FULL_NAME" = "$GITHUB_REPOSITORY" ]; then
+            git fetch origin "$PR_HEAD_REF"
+            MERGE_REF="origin/$PR_HEAD_REF"
+          else
+            git fetch "https://github.com/${PR_HEAD_REPO_FULL_NAME}.git" "$PR_HEAD_REF"
+            MERGE_REF="FETCH_HEAD"
+          fi
+
+          git merge --no-ff --no-edit "$MERGE_REF" -m "Promote PR #${PR_NUMBER} to ${RELEASE_BRANCH}"
+
+          git push origin "$BRANCH_NAME" --force-with-lease
+
+      - name: Open PR against release branch
+        env:
+          RELEASE_BRANCH: ${{ steps.release_config.outputs.release_branch }}
+          PR_NUMBER: ${{ steps.pr_context.outputs.pr_number }}
+          PR_TITLE: ${{ steps.pr_context.outputs.pr_title }}
+          PR_AUTHOR: ${{ steps.pr_context.outputs.pr_author }}
+          PR_HEAD_REF: ${{ steps.pr_context.outputs.pr_head_ref }}
+          TRIGGER_BRANCH: ${{ steps.pr_context.outputs.trigger_branch }}
+        run: |
+          set -e
+          EXISTING=$(gh pr list --base "$RELEASE_BRANCH" --head "$BRANCH_NAME" --json number --jq '.[0].number' || true)
+
+          if [ -n "$EXISTING" ]; then
+            echo "PR already open against $RELEASE_BRANCH for this branch: #$EXISTING"
+            exit 0
+          fi
+
+          gh pr create \
+            --base "$RELEASE_BRANCH" \
+            --head "$BRANCH_NAME" \
+            --title "$PR_TITLE (#$PR_NUMBER)" \
+            --body "Auto-opened from PR #${PR_NUMBER} (\`${PR_HEAD_REF}\`) by @${PR_AUTHOR} after a successful build check against \`${TRIGGER_BRANCH}\`. Note: PR #${PR_NUMBER} may not be merged into \`${TRIGGER_BRANCH}\` yet — this PR reflects its current state and will update automatically on new commits." \
+            --label "auto-promotion" || \
+          gh pr create \
+            --base "$RELEASE_BRANCH" \
+            --head "$BRANCH_NAME" \
+            --title "$PR_TITLE (#$PR_NUMBER)" \
+            --body "Auto-opened from PR #${PR_NUMBER} (\`${PR_HEAD_REF}\`) by @${PR_AUTHOR} after a successful build check against \`${TRIGGER_BRANCH}\`. Note: PR #${PR_NUMBER} may not be merged into \`${TRIGGER_BRANCH}\` yet — this PR reflects its current state and will update automatically on new commits."
+          # second gh pr create is a fallback in case the 'auto-promotion'
+          # label doesn't exist in this repo yet
+
+  notify-build-failure:
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: self-hosted
+    env:
+      GH_TOKEN: ${{ secrets.REPO_PAT || secrets.GITHUB_TOKEN }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+    steps:
+      - name: Comment on the PR about the failed build
+        run: |
+          set -e
+          PR_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq '.pull_requests[0] // empty')
+          if [ -n "$PR_JSON" ]; then
+            PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number')
+          else
+            HEAD_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq '.head_sha')
+            PR_NUMBER=$(gh pr list --state open --json number,headRefOid --jq \
+              ".[] | select(.headRefOid == \"${HEAD_SHA}\") | .number" | head -1)
+          fi
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "Could not resolve a PR number for failed run ${RUN_ID}; nothing to comment on."
+            exit 0
+          fi
+
+          gh pr comment "$PR_NUMBER" --body "⚠️ Build check failed. Nothing was opened against the release branch. Check the Build Check workflow run for details." || true
