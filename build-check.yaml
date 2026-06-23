@@ -47,6 +47,7 @@ jobs:
       gradle_version: ${{ steps.config.outputs.gradle_version }}
       go_version: ${{ steps.config.outputs.go_version }}
       rust_version: ${{ steps.config.outputs.rust_version }}
+      dotnet_version: ${{ steps.config.outputs.dotnet_version }}
       ecosystem: ${{ steps.detect.outputs.ecosystem }}
       should_run: ${{ steps.config.outputs.should_run }}
     steps:
@@ -72,6 +73,7 @@ jobs:
           VAR_GRADLE_VERSION: ${{ vars.GRADLE_VERSION }}
           VAR_GO_VERSION: ${{ vars.GO_VERSION }}
           VAR_RUST_VERSION: ${{ vars.RUST_VERSION }}
+          VAR_DOTNET_VERSION: ${{ vars.DOTNET_VERSION }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           ECOSYSTEM: ${{ steps.detect.outputs.ecosystem }}
         run: |
@@ -176,6 +178,11 @@ jobs:
               ECO_BUILD="npm run build"
               TOOLCHAIN_ID="node"
               ;;
+            angular)
+              ECO_INSTALL="npm ci"
+              ECO_BUILD="npm run build"
+              TOOLCHAIN_ID="angular"
+              ;;
             python)
               ECO_INSTALL="pip install -r requirements.txt"
               ECO_BUILD="python -m build"
@@ -184,22 +191,17 @@ jobs:
             maven)
               ECO_INSTALL=""
               ECO_BUILD="mvn -B package"
-              TOOLCHAIN_ID="java-maven"
+              TOOLCHAIN_ID="maven"
               ;;
             gradle)
               ECO_INSTALL=""
               ECO_BUILD="gradle build"
-              TOOLCHAIN_ID="java-gradle"
+              TOOLCHAIN_ID="gradle"
               ;;
-            go)
-              ECO_INSTALL="go mod download"
-              ECO_BUILD="go build ./..."
-              TOOLCHAIN_ID="go"
-              ;;
-            rust)
-              ECO_INSTALL=""
-              ECO_BUILD="cargo build --release"
-              TOOLCHAIN_ID="rust"
+            dotnet)
+              ECO_INSTALL="dotnet restore"
+              ECO_BUILD="dotnet build --no-restore"
+              TOOLCHAIN_ID="dotnet"
               ;;
             *)
               ECO_INSTALL=""
@@ -219,6 +221,7 @@ jobs:
           GRADLE_VERSION="${VAR_GRADLE_VERSION:-${FILE_GRADLE_VERSION:-8.10.2}}"
           GO_VERSION="${VAR_GO_VERSION:-${FILE_GO_VERSION:-${DETECTED_GO_VERSION:-1.22.9}}}"
           RUST_VERSION="${VAR_RUST_VERSION:-${FILE_RUST_VERSION:-stable}}"
+          DOTNET_VERSION="${VAR_DOTNET_VERSION:-8.0}"
 
           if [ -z "$BUILD_COMMAND" ]; then
             echo "::error::No build command resolved. Detected ecosystem '$ECOSYSTEM' has no default, and BUILD_COMMAND repo variable / promote-config.yml build_command is unset."
@@ -256,6 +259,7 @@ jobs:
             echo "gradle_version=$GRADLE_VERSION"
             echo "go_version=$GO_VERSION"
             echo "rust_version=$RUST_VERSION"
+            echo "dotnet_version=$DOTNET_VERSION"
             echo "should_run=$SHOULD_RUN"
           } >> "$GITHUB_OUTPUT"
 
@@ -278,6 +282,11 @@ jobs:
       PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
       PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       PR_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+      # Registry URLs — set as repo variables under
+      # Settings > Secrets and variables > Actions > Variables.
+      # URLs are not sensitive (no credentials) so variables, not secrets.
+      NPM_REGISTRY_URL: ${{ vars.NPM_REGISTRY_URL }}
+      NUGET_REGISTRY_URL: ${{ vars.NUGET_REGISTRY_URL }}
 
     steps:
       # No token: input here — checkout uses the default read-only token,
@@ -321,31 +330,159 @@ jobs:
           echo "Local merge result:"
           git log -1 --oneline
 
-      - name: Setup toolchain
-        id: toolchain
-        uses: ./.github/actions/setup-toolchain
+      - name: Detect Java version from codebase
+        id: java_version_detect
+        if: needs.resolve-config.outputs.ecosystem == 'maven' || needs.resolve-config.outputs.ecosystem == 'gradle'
+        uses: ./.github/actions/detect-java-version
+
+      - name: Resolve final Java version
+        id: java_version
+        if: needs.resolve-config.outputs.ecosystem == 'maven' || needs.resolve-config.outputs.ecosystem == 'gradle'
+        run: |
+          # Priority: resolve-config output (repo var / config file) >
+          #           codebase detection > hardcoded default
+          CONFIG_VERSION="${{ needs.resolve-config.outputs.java_version }}"
+          DETECTED_VERSION="${{ steps.java_version_detect.outputs.java_version }}"
+          FINAL="${CONFIG_VERSION:-${DETECTED_VERSION:-21}}"
+          echo "java_version=$FINAL" >> "$GITHUB_OUTPUT"
+          echo "Final java_version=$FINAL (config=$CONFIG_VERSION, detected=$DETECTED_VERSION)"
+
+      # ----------------------------------------------------------------
+      # Ecosystem-specific toolchain setup using official actions.
+      # Each block is conditional on the detected ecosystem so only the
+      # right setup action runs, never all of them.
+      # ----------------------------------------------------------------
+
+      - name: Setup JDK (Maven)
+        if: needs.resolve-config.outputs.ecosystem == 'maven'
+        uses: actions/setup-java@v3
         with:
-          ecosystem: ${{ needs.resolve-config.outputs.toolchain_id }}
-          node_version: ${{ needs.resolve-config.outputs.node_version }}
-          python_version: ${{ needs.resolve-config.outputs.python_version }}
-          java_version: ${{ needs.resolve-config.outputs.java_version }}
-          maven_version: ${{ needs.resolve-config.outputs.maven_version }}
-          gradle_version: ${{ needs.resolve-config.outputs.gradle_version }}
-          go_version: ${{ needs.resolve-config.outputs.go_version }}
-          rust_version: ${{ needs.resolve-config.outputs.rust_version }}
+          distribution: temurin
+          java-version: ${{ steps.java_version.outputs.java_version }}
+          cache: maven
+          # setup-java generates ~/.m2/settings.xml with a single server
+          # entry. Since we have multiple Maven registries, we call it once
+          # per server-id and use overwrite-settings: false after the first.
+          # The ARTIFACTORY_USERNAME / ARTIFACTORY_PASSWORD env vars are
+          # set on the build steps below and are referenced from settings.xml.
+          server-id: mvn-public-local
+          server-username: ARTIFACTORY_USERNAME
+          server-password: ARTIFACTORY_PASSWORD
+
+      - name: Add Maven registry entries (mvn-central)
+        if: needs.resolve-config.outputs.ecosystem == 'maven'
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: ${{ steps.java_version.outputs.java_version }}
+          overwrite-settings: false
+          server-id: mvn-central
+          server-username: ARTIFACTORY_USERNAME
+          server-password: ARTIFACTORY_PASSWORD
+
+      - name: Add Maven registry entries (mvn-plugins-release)
+        if: needs.resolve-config.outputs.ecosystem == 'maven'
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: ${{ steps.java_version.outputs.java_version }}
+          overwrite-settings: false
+          server-id: mvn-plugins-release
+          server-username: ARTIFACTORY_USERNAME
+          server-password: ARTIFACTORY_PASSWORD
+
+      - name: Setup JDK (Gradle)
+        if: needs.resolve-config.outputs.ecosystem == 'gradle'
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: ${{ steps.java_version.outputs.java_version }}
+          cache: gradle
+
+      - name: Setup Gradle registry init script
+        if: needs.resolve-config.outputs.ecosystem == 'gradle'
+        uses: ./.github/actions/configure-registries
+        with:
+          ecosystem: gradle
+          artifactory_username: ${{ secrets.ARTIFACTORY_USERNAME }}
+          artifactory_password: ${{ secrets.ARTIFACTORY_PASSWORD }}
+
+      - name: Verify installed JDK matches project requirement
+        if: needs.resolve-config.outputs.ecosystem == 'maven' || needs.resolve-config.outputs.ecosystem == 'gradle'
+        run: |
+          ACTUAL=$(java -version 2>&1 | grep -oE '"[0-9]+\.' | grep -oE '[0-9]+' | head -1)
+          EXPECTED="${{ steps.java_version.outputs.java_version }}"
+          echo "Installed JDK major version: $ACTUAL (expected: $EXPECTED)"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Installed JDK $ACTUAL does not match required version $EXPECTED. Check java_version detection output above."
+            exit 1
+          fi
+          echo "JDK version check passed: $ACTUAL == $EXPECTED"
+
+      - name: Setup Node (node)
+        if: needs.resolve-config.outputs.ecosystem == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ needs.resolve-config.outputs.node_version }}
+          cache: npm
+          registry-url: ${{ env.NPM_REGISTRY_URL }}
+
+      - name: Setup Node (angular)
+        if: needs.resolve-config.outputs.ecosystem == 'angular'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ needs.resolve-config.outputs.node_version }}
+          cache: npm
+          registry-url: ${{ env.NPM_REGISTRY_URL }}
+
+      - name: Setup Python
+        if: needs.resolve-config.outputs.ecosystem == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ needs.resolve-config.outputs.python_version }}
+          cache: pip
+
+      - name: Configure pip registry
+        if: needs.resolve-config.outputs.ecosystem == 'python'
+        uses: ./.github/actions/configure-registries
+        with:
+          ecosystem: python
+          artifactory_username: ${{ secrets.ARTIFACTORY_USERNAME }}
+          artifactory_password: ${{ secrets.ARTIFACTORY_PASSWORD }}
+
+      - name: Setup .NET
+        if: needs.resolve-config.outputs.ecosystem == 'dotnet'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ needs.resolve-config.outputs.dotnet_version }}
+
+      - name: Configure NuGet source (.NET)
+        if: needs.resolve-config.outputs.ecosystem == 'dotnet'
+        run: |
+          dotnet nuget add source "${{ env.NUGET_REGISTRY_URL }}" \
+            --name artifactory \
+            --username "${{ secrets.ARTIFACTORY_USERNAME }}" \
+            --password "${{ secrets.ARTIFACTORY_PASSWORD }}" \
+            --store-password-in-clear-text || true
 
       - name: Install dependencies
         if: env.INSTALL_COMMAND != ''
+        env:
+          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+          ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+          NODE_AUTH_TOKEN: ${{ secrets.ARTIFACTORY_PASSWORD }}
         run: |
           set -e
-          export PATH="${TOOLCHAIN_BIN}:${PATH}"
           eval "$INSTALL_COMMAND"
 
       - name: Run build
         id: build
+        env:
+          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+          ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+          NODE_AUTH_TOKEN: ${{ secrets.ARTIFACTORY_PASSWORD }}
         run: |
           set -e
-          export PATH="${TOOLCHAIN_BIN}:${PATH}"
           eval "$BUILD_COMMAND"
 
       # No promotion happens here. promote.yml picks up from this point,
