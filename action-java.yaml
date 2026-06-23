@@ -1,0 +1,63 @@
+name: Detect Java Version
+description: >
+  Detects the required JDK version from the codebase using multiple
+  sources in priority order:
+    1. pom.xml (maven.compiler.source/target, java.version, release tag)
+    2. build.gradle / build.gradle.kts (sourceCompatibility,
+       JavaLanguageVersion.of(), toolchain block)
+    3. gradle.properties (org.gradle.java.home version parse)
+    4. .mvn/wrapper/maven-wrapper.properties (jvmVersion field, rare)
+  Outputs empty string if nothing found so the caller falls through to
+  its own default (repo variable > promote-config.yml > hardcoded 21).
+  All detection uses grep -E only (no grep -P) -- safe on minimal Linux.
+
+outputs:
+  java_version:
+    description: >
+      Detected Java major version as a bare integer (e.g. "17", "21"),
+      or empty string if not found. Legacy 1.8-style normalized to "8".
+    value: ${{ steps.detect.outputs.java_version }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Detect Java version from codebase
+      id: detect
+      shell: bash
+      run: |
+        RAW=""
+
+        if [ -f "pom.xml" ]; then
+          [ -z "$RAW" ] && RAW=$(grep -oE '<maven\.compiler\.(source|target)>[0-9._]+' pom.xml 2>/dev/null | grep -oE '[0-9._]+$' | head -1)
+          [ -z "$RAW" ] && RAW=$(grep -oE '<java\.version>[0-9._]+' pom.xml 2>/dev/null | grep -oE '[0-9._]+$' | head -1)
+          [ -z "$RAW" ] && RAW=$(grep -oE '<release>[0-9]+' pom.xml 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+        fi
+
+        for GFILE in build.gradle build.gradle.kts; do
+          [ -f "$GFILE" ] || continue
+          [ -z "$RAW" ] && RAW=$(grep -oE "sourceCompatibility[[:space:]]*=[[:space:]]*['\"]?[0-9._]+" "$GFILE" 2>/dev/null | grep -oE '[0-9._]+$' | head -1)
+          [ -z "$RAW" ] && RAW=$(grep -oE 'JavaLanguageVersion\.of\([0-9]+' "$GFILE" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+          [ -z "$RAW" ] && RAW=$(grep -oE 'languageVersion[[:space:]]*=[[:space:]]*JavaLanguageVersion\.of\([0-9]+' "$GFILE" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+        done
+
+        if [ -f "gradle.properties" ] && [ -z "$RAW" ]; then
+          HOME_VAL=$(grep -oE 'org\.gradle\.java\.home[[:space:]]*=[[:space:]]*[^[:space:]]+' gradle.properties 2>/dev/null | sed 's/.*=//')
+          if [ -n "$HOME_VAL" ]; then
+            RAW=$(echo "$HOME_VAL" | grep -oE 'java-[0-9]+' | grep -oE '[0-9]+' | head -1)
+            [ -z "$RAW" ] && RAW=$(echo "$HOME_VAL" | grep -oE '[0-9]+' | head -1)
+          fi
+        fi
+
+        if [ -f ".mvn/wrapper/maven-wrapper.properties" ] && [ -z "$RAW" ]; then
+          RAW=$(grep -oE 'jvmVersion[[:space:]]*=[[:space:]]*[0-9._]+' .mvn/wrapper/maven-wrapper.properties 2>/dev/null | grep -oE '[0-9._]+$' | head -1)
+        fi
+
+        if [ -n "$RAW" ]; then
+          case "$RAW" in 1.*) RAW="${RAW#1.}" ;; esac
+          RAW=$(echo "$RAW" | grep -oE '^[0-9]+')
+          echo "Detected java_version=$RAW from codebase"
+        else
+          echo "No Java version found in codebase, caller will use its own fallback"
+        fi
+
+        echo "java_version=$RAW" >> "$GITHUB_OUTPUT"
