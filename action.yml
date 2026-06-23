@@ -1,0 +1,55 @@
+name: Detect Ecosystem
+description: >
+  Detects the project ecosystem by inspecting files in the workspace.
+  Outputs: ecosystem (maven | gradle | node | angular | dotnet | python | unknown)
+
+outputs:
+  ecosystem:
+    description: >
+      Detected ecosystem: maven, gradle, node, angular, dotnet, python, or unknown.
+    value: ${{ steps.check-files.outputs.ecosystem }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Identify Ecosystem
+      id: check-files
+      shell: bash
+      run: |
+        WORKSPACE_PATH="${{ github.workspace }}"
+        echo "Checking files in: $WORKSPACE_PATH"
+
+        ECOSYSTEM="unknown"
+
+        # Maven — pom.xml is unambiguous
+        if [ -f "$WORKSPACE_PATH/pom.xml" ]; then
+          ECOSYSTEM="maven"
+
+        # Gradle — build file present
+        elif [ -f "$WORKSPACE_PATH/build.gradle" ] || [ -f "$WORKSPACE_PATH/build.gradle.kts" ]; then
+          ECOSYSTEM="gradle"
+
+        # Angular — has both package.json AND angular.json
+        elif [ -f "$WORKSPACE_PATH/package.json" ] && [ -f "$WORKSPACE_PATH/angular.json" ]; then
+          ECOSYSTEM="angular"
+
+        # Node — package.json without angular.json
+        elif [ -f "$WORKSPACE_PATH/package.json" ]; then
+          ECOSYSTEM="node"
+
+        # .NET — csproj, sln, or global.json
+        elif ls "$WORKSPACE_PATH"/*.csproj 2>/dev/null | grep -q . || \
+             ls "$WORKSPACE_PATH"/*.sln    2>/dev/null | grep -q . || \
+             find "$WORKSPACE_PATH" -maxdepth 2 -name "*.csproj" 2>/dev/null | grep -q . || \
+             [ -f "$WORKSPACE_PATH/global.json" ]; then
+          ECOSYSTEM="dotnet"
+
+        # Python
+        elif [ -f "$WORKSPACE_PATH/requirements.txt" ] || \
+             [ -f "$WORKSPACE_PATH/pyproject.toml" ]  || \
+             [ -f "$WORKSPACE_PATH/setup.py" ]; then
+          ECOSYSTEM="python"
+        fi
+
+        echo "Detected ecosystem: $ECOSYSTEM"
+        echo "ecosystem=$ECOSYSTEM" >> "$GITHUB_OUTPUT"
